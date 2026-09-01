@@ -1,0 +1,6 @@
+{
+  "python.defaultInterpreterPath": "/opt/miniconda3/envs/predictive_coding_simple/bin/python",
+  "python.analysis.extraPaths": [
+    "${workspaceFolder}/latent-rollout-lab"
+  ]
+}

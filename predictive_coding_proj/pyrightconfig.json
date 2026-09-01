@@ -1,0 +1,11 @@
+{
+  "pythonVersion": "3.12",
+  "venvPath": "/opt/miniconda3/envs",
+  "venv": "predictive_coding_simple",
+  "executionEnvironments": [
+    {
+      "root": "latent-rollout-lab",
+      "extraPaths": ["latent-rollout-lab"]
+    }
+  ]
+}
