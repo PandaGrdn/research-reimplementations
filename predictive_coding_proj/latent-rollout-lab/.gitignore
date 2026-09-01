@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+artifacts/*.pt
+artifacts/*.png
+results/*
+!results/.gitkeep
+!results/report/.gitkeep

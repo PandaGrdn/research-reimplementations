@@ -1,0 +1,41 @@
+seed: 0
+device: auto
+run_name: null
+
+data:
+  root: ../data
+  n_train: 1200
+  n_val: 32
+  n_test: 32
+
+ae:
+  checkpoint: artifacts/ae.pt
+  epochs: 100
+  lr: 0.001
+  batch_size: 32
+  in_channels: 1
+  latent_channels: 32
+  kernel_size: 4
+  stride: 2
+  padding: 1
+
+temporal:
+  epochs: 25
+  lr: 0.001
+  batch_size: 8
+  context: 8
+
+model:
+  name: convgru
+  hidden_channels: 64
+  num_layers: 2
+  kernel_size: 3
+
+eval:
+  context_lengths: [2, 8]
+  horizons: [1, 5, 10, 18]
+  lpips: true
+  batch_size: 8
+
+strategy:
+  name: curriculum

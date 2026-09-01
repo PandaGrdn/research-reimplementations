@@ -1,0 +1,5 @@
+strategy:
+  name: curriculum
+  warmup: 8
+  epochs_per_stage: 3
+  max_unroll: null

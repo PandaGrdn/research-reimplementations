@@ -1,0 +1,5 @@
+model:
+  name: convgru
+  hidden_channels: 64
+  num_layers: 2
+  kernel_size: 3

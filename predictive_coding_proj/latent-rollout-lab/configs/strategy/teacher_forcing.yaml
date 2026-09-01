@@ -1,0 +1,2 @@
+strategy:
+  name: teacher_forcing

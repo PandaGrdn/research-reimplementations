@@ -1,0 +1,5 @@
+strategy:
+  name: scheduled_sampling
+  p_start: 1.0
+  p_end: 0.0
+  include_tf_loss: true

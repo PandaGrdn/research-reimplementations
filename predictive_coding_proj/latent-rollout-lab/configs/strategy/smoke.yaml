@@ -1,0 +1,20 @@
+seed: 0
+data:
+  n_train: 32
+  n_val: 8
+  n_test: 8
+ae:
+  epochs: 1
+  checkpoint: artifacts/ae_smoke.pt
+temporal:
+  epochs: 1
+  batch_size: 8
+eval:
+  context_lengths: [2, 8]
+  horizons: [1, 5]
+  lpips: false
+strategy:
+  name: curriculum
+  warmup: 0
+  epochs_per_stage: 1
+  max_unroll: 2
