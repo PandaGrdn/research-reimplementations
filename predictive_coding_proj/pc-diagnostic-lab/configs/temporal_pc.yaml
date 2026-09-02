@@ -1,0 +1,42 @@
+# Defaults match temporal_predictive_coding.ipynb main() unless noted.
+# C1 uses this file as-is (notebook parity). C2 overrides mitigations per cell.
+
+inference:
+  alpha: 0.001
+  lambda_u: 0.001
+  lr_r: 0.02
+  lr_u: 0.002
+  sigma_2: 1.0
+  num_epochs_inner: 200
+  num_epochs_outer: 1
+  init_noise: 0.01
+  use_prior: true
+  conv_tol: null
+
+temporal:
+  epochs: 20
+  delta_scale: 1.0
+  delta_bounded: true
+  delta_loss_weight: 100.0
+  delta_target_loss: true
+  lambda_slow: 3.0
+  r_noise_std: 0.0
+  r_noise_std_end: 0.05
+  ss_p: 0.0
+  ss_p_end: 0.4
+  rollout_k: 4
+  split_fix: false
+  max_grad_norm: 1.0
+  freeze_dictionary: true
+
+amortized:
+  epochs: 20
+  lr: 0.001
+  batch_size: 32
+  latent_channels: 32
+  kernel_size: 4
+  stride: 2
+  padding: 1
+  lambda_slow: 1.0
+  temporal_epochs: 10
+  temporal_lr: 0.002

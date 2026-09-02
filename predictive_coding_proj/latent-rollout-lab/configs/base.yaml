@@ -9,12 +9,12 @@ data:
   n_test: 32
 
 ae:
-  checkpoint: artifacts/ae.pt
+  checkpoint: artifacts/ae_2layer.pt
   epochs: 100
   lr: 0.001
   batch_size: 32
   in_channels: 1
-  latent_channels: 32
+  channels: [32, 64]
   kernel_size: 4
   stride: 2
   padding: 1

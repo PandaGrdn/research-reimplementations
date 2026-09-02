@@ -1,3 +1,4 @@
+from src.models.autoencoder import ae_channels
 from src.models.convgru import NextFramePredictor
 from src.strategies.curriculum import CurriculumStrategy
 from src.strategies.scheduled_sampling import ScheduledSamplingStrategy
@@ -20,7 +21,7 @@ def build_model(cfg):
     if name not in MODELS:
         raise KeyError(f"unknown model {name}; registered: {list(MODELS)}")
     return MODELS[name](
-        latent_channels=cfg["ae"]["latent_channels"],
+        latent_channels=ae_channels(cfg)[-1],
         hidden_channels=m["hidden_channels"],
         num_layers=m["num_layers"],
         kernel_size=m.get("kernel_size", 3),

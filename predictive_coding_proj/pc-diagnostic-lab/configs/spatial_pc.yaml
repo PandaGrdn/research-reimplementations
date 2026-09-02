@@ -1,0 +1,14 @@
+spatial:
+  num_layers: 2
+  num_channels: 16
+  kernel_size: 4
+  padding: 1
+  stride: 2
+  initial_r_size: 64
+  init_noise: 0.01
+  epochs: 6
+  num_epochs_inner: 50
+  n_frames: 120
+  freeze: true
+  pretrain: true
+  checkpoint: artifacts/dictionary.pt

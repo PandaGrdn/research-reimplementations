@@ -1,0 +1,48 @@
+# CPU CI overlay. run_all.py --smoke must finish in <10 min.
+n_seeds: 1
+n_seeds_inference: 1
+
+data:
+  n_train: 2
+  n_val: 1
+  n_test: 1
+
+spatial:
+  epochs: 1
+  num_epochs_inner: 2
+  n_frames: 8
+
+inference:
+  num_epochs_inner: 2
+  lr_r: 0.02
+
+temporal:
+  epochs: 1
+  r_noise_std_end: 0.0
+  ss_p_end: 0.0
+  rollout_k: 1
+
+amortized:
+  epochs: 1
+  batch_size: 4
+  temporal_epochs: 1
+
+eval:
+  n_rollout_sequences: 1
+  n_pair_sequences: 1
+  n_unrelated_frames: 4
+  max_unrelated_pairs: 6
+  n_determinism_frames: 2
+  split_points: [2]
+  headline_split: 2
+
+c2:
+  cells: ["baseline", "all_combined"]
+
+c4:
+  iters: [2]
+  lr_r: [0.02]
+  use_prior: [true]
+
+c7:
+  lambda_slow: [0.0, 1.0]

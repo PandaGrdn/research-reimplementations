@@ -1,0 +1,19 @@
+seed: 0
+device: auto
+n_seeds: 3
+n_seeds_inference: 5
+
+data:
+  root: ../data
+  n_train: 1000
+  n_val: 32
+  n_test: 100
+
+eval:
+  n_rollout_sequences: 32
+  n_pair_sequences: 12
+  n_unrelated_frames: 40
+  max_unrelated_pairs: 200
+  n_determinism_frames: 20
+  split_points: [5, 10, 15]
+  headline_split: 10
