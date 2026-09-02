@@ -25,7 +25,7 @@ temporal:
 amortized:
   epochs: 1
   batch_size: 4
-  temporal_epochs: 1
+  hidden: 8
 
 eval:
   n_rollout_sequences: 1
@@ -37,12 +37,34 @@ eval:
   headline_split: 2
 
 c2:
-  cells: ["baseline", "all_combined"]
+  cells: ["baseline", "all_combined", "temporal_prior_off"]
 
 c4:
   iters: [2]
   lr_r: [0.02]
+  init_noise: [0.0, 0.01]
   use_prior: [true]
+
+c5:
+  iters: [2]
 
 c7:
   lambda_slow: [0.0, 1.0]
+  unroll_k: [0, 2]
+
+ladder:
+  arms: [baseline, zero_init]
+  only: [c1, c5, c9]
+
+c8:
+  arms: ["iterative", "amortized"]
+
+c0:
+  max_iters: 2
+
+c9:
+  n_train_sequences: 1
+  steps: 5
+  models: ["linear"]
+  shifts: [[2, 0], [1, 0]]
+  n_translation_frames: 2

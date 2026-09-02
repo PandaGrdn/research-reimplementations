@@ -1,0 +1,4 @@
+arm: strong_temporal_prior
+
+inference:
+  temporal_prior_weight: 1.0

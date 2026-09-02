@@ -5,10 +5,144 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.inference import settle_with_temporal_prior
+from src.inference import _prepare_image, settle_with_temporal_prior
 from src.metrics import delta_ratio
 from src.spatial_pc import f_clamp, normalize_kernels
 from src.utils import clone_r
+
+
+def settle_with_temporal_prior_unrolled(
+    I,
+    r_curr,
+    r_pred,
+    deconvs,
+    alpha,
+    lr_r,
+    sigma_2,
+    num_epochs_inner,
+    num_layers,
+    r_prev1=None,
+    lambda_slow=0.0,
+    use_prior=True,
+    temporal_prior_weight=0.01,
+    unroll_last_k=0,
+):
+    """Same iterative settle as `settle_with_temporal_prior`, except the last
+    `unroll_last_k` iterations are NOT detached: r_curr ends up a differentiable
+    function of the dictionary weights (via `deconvs[i](r)` and the
+    `F.conv2d(e, deconvs[i].weight)` bottom-up term) and of `r_pred` (the GRU's
+    prediction). The first `num_epochs_inner - unroll_last_k` iterations are
+    identical to the detached version (bit-for-bit, same dr formula).
+
+    This exists because `settle_with_temporal_prior` always detaches every
+    step, so `r_curr` is a detached leaf by the time the weight loss uses it:
+    `lambda_slow * mean((r_curr - r_prev1) ** 2)` then has ZERO gradient into
+    the dictionary or the GRU (the C7 "plateau" it produces is guaranteed by
+    construction, not evidence). Unrolling the last k steps gives that term
+    (and the temporal-prior pull) a real path: into the dictionary through
+    r_curr's graph, and into the GRU through the un-detached r_pred used in
+    the temporal-prior term of those last k steps.
+
+    unroll_last_k=0 reduces exactly to settle_with_temporal_prior (same dr
+    formula, same detach-every-step behaviour) — kept as a separate function
+    rather than folded into settle_with_temporal_prior because this file may
+    not edit src/inference.py.
+    """
+    I_curr = _prepare_image(I)
+    has_prev = r_prev1 is not None
+    unroll_last_k = max(0, min(int(unroll_last_k), int(num_epochs_inner)))
+    n_detached = num_epochs_inner - unroll_last_k
+
+    def _step(r_curr, detach):
+        e_spatial = [None] * num_layers
+        e_spatial[0] = I_curr - f_clamp(deconvs[0](r_curr[0]))
+        for i in range(1, num_layers):
+            e_spatial[i] = r_curr[i - 1] - f_clamp(deconvs[i](r_curr[i]))
+        r_next = list(r_curr)
+        for i in range(num_layers):
+            cauchy_prior = alpha * (2 * r_curr[i] / (1 + r_curr[i] ** 2)) if use_prior else 0.0
+            bottom_up = F.conv2d(
+                e_spatial[i],
+                deconvs[i].weight,
+                padding=deconvs[i].padding,
+                stride=deconvs[i].stride,
+            )
+            r_pred_i = r_pred[i].detach() if detach else r_pred[i]
+            dr = (1.0 / sigma_2) * bottom_up - cauchy_prior - (temporal_prior_weight / sigma_2) * (
+                r_curr[i] - r_pred_i
+            )
+            if has_prev and lambda_slow > 0:
+                dr = dr - 2.0 * lambda_slow * (r_curr[i] - r_prev1[i])
+            if i < num_layers - 1:
+                dr = dr - (1.0 / sigma_2) * e_spatial[i + 1]
+            updated = r_curr[i] + lr_r * dr
+            if detach:
+                updated = updated.detach()
+                updated.requires_grad = True
+            r_next[i] = updated
+        return r_next, e_spatial
+
+    e_spatial = [None] * num_layers
+    for _ in range(n_detached):
+        r_curr, e_spatial = _step(r_curr, detach=True)
+    for _ in range(unroll_last_k):
+        r_curr, e_spatial = _step(r_curr, detach=False)
+
+    return r_curr, e_spatial, I_curr
+
+
+def slowness_has_dictionary_grad(
+    I,
+    r_init,
+    deconvs,
+    temporal_nn,
+    alpha,
+    lr_r,
+    sigma_2,
+    num_epochs_inner,
+    num_layers,
+    lambda_slow=1.0,
+    temporal_prior_weight=0.01,
+    slow_unroll_k=0,
+):
+    """Diagnostic (no side effects on weights): isolate whether the slowness
+    term `lambda_slow * mean((r_curr - r_prev1) ** 2)` ALONE has a nonzero
+    gradient into any unfrozen dictionary weight.
+
+    Runs one settle from r_prev1=r_init on frame I (detached if
+    slow_unroll_k==0, unrolled otherwise), builds ONLY the slowness loss term
+    (deliberately excluding the reconstruction / delta-target terms — those
+    update the dictionary regardless of the slowness bug and would mask the
+    answer), backprops it, and reports whether any deconv weight.grad is
+    nonzero. Leaves deconvs/temporal_nn parameters unmodified; clears any
+    .grad it set.
+    """
+    for d in deconvs:
+        d.zero_grad()
+    r_prev1 = clone_r(r_init)
+    hidden = temporal_nn.init_hidden(r_init)
+    with torch.no_grad():
+        r_pred, _, _ = temporal_nn(r_prev1, hidden)
+    r_curr0 = clone_r(r_init)
+    if slow_unroll_k and slow_unroll_k > 0:
+        r_curr, _, _ = settle_with_temporal_prior_unrolled(
+            I, r_curr0, r_pred, deconvs, alpha, lr_r, sigma_2, num_epochs_inner, num_layers,
+            r_prev1=r_prev1, lambda_slow=lambda_slow, temporal_prior_weight=temporal_prior_weight,
+            unroll_last_k=slow_unroll_k,
+        )
+    else:
+        r_curr, _, _ = settle_with_temporal_prior(
+            I, r_curr0, r_pred, deconvs, alpha, lr_r, sigma_2, num_epochs_inner, num_layers,
+            r_prev1=r_prev1, lambda_slow=lambda_slow, temporal_prior_weight=temporal_prior_weight,
+        )
+    slow_loss = sum(lambda_slow * torch.mean((r_curr[j] - r_prev1[j]) ** 2) for j in range(num_layers))
+    slow_loss.backward()
+    has_grad = any(
+        d.weight.grad is not None and bool(torch.any(d.weight.grad != 0).item()) for d in deconvs
+    )
+    for d in deconvs:
+        d.weight.grad = None
+    return has_grad
 
 
 class ConvGRUCell(nn.Module):
@@ -101,6 +235,9 @@ def train_loop(
     delta_target_loss=True,
     use_prior=True,
     max_grad_norm=1.0,
+    temporal_prior_weight=0.01,
+    slow_unroll_k=0,
+    encoder=None,
 ):
     I_curr = I_curr.float()
     if I_curr.ndim == 3:
@@ -128,20 +265,45 @@ def train_loop(
         h_in = [hi.detach() for hi in hidden]
         r_pred, h_new, deltas = temporal_nn(r_in, h_in)
 
-        r_curr, e_spatial, I_ready = settle_with_temporal_prior(
-            I_curr,
-            r_curr,
-            r_pred,
-            deconvs,
-            alpha,
-            lr_r,
-            sigma_2,
-            num_epochs_inner,
-            num_layers,
-            r_prev1=r_prev1 if has_prev else None,
-            lambda_slow=lambda_slow,
-            use_prior=use_prior,
-        )
+        if encoder is not None:
+            I_ready = _prepare_image(I_curr)
+            r_curr = [ri.detach() for ri in encoder(I_ready)]
+        elif slow_unroll_k and slow_unroll_k > 0:
+            # Unrolled settle: r_curr stays a differentiable function of the
+            # dictionary (and, via the un-detached r_pred in its last steps,
+            # of the GRU) so the slowness term below actually reaches them.
+            r_curr, e_spatial, I_ready = settle_with_temporal_prior_unrolled(
+                I_curr,
+                r_curr,
+                r_pred,
+                deconvs,
+                alpha,
+                lr_r,
+                sigma_2,
+                num_epochs_inner,
+                num_layers,
+                r_prev1=r_prev1 if has_prev else None,
+                lambda_slow=lambda_slow,
+                use_prior=use_prior,
+                temporal_prior_weight=temporal_prior_weight,
+                unroll_last_k=slow_unroll_k,
+            )
+        else:
+            r_curr, e_spatial, I_ready = settle_with_temporal_prior(
+                I_curr,
+                r_curr,
+                r_pred,
+                deconvs,
+                alpha,
+                lr_r,
+                sigma_2,
+                num_epochs_inner,
+                num_layers,
+                r_prev1=r_prev1 if has_prev else None,
+                lambda_slow=lambda_slow,
+                use_prior=use_prior,
+                temporal_prior_weight=temporal_prior_weight,
+            )
 
         e_spatial[0] = I_ready - f_clamp(deconvs[0](r_curr[0]))
         r_pred, h_new, deltas = temporal_nn(r_in, h_in)
@@ -171,6 +333,13 @@ def train_loop(
                     normalize_kernels(deconvs[j])
                     deconvs[j].weight.grad = None
         _update_temporal_params(temporal_nn, lr_u, lambda_u, max_grad_norm=max_grad_norm)
+
+        # settle_with_temporal_prior always returns a detached leaf; the unrolled
+        # variant does not (that's the point — it needs a live graph up to
+        # total_loss.backward() above). Detach here, after the weight update, so
+        # callers get the same detached tensors either way and so a later outer
+        # epoch doesn't chain autograd graphs across already-freed backward passes.
+        r_curr = [ri.detach() for ri in r_curr]
 
     return r_curr, r_pred, [hi.detach() for hi in h_new], delta_stats
 
@@ -224,6 +393,9 @@ def train_video_sequence(
     delta_target_loss=True,
     use_prior=True,
     max_grad_norm=1.0,
+    temporal_prior_weight=0.01,
+    slow_unroll_k=0,
+    encoder=None,
 ):
     r_prev1 = None
     hidden = None
@@ -257,6 +429,9 @@ def train_video_sequence(
             delta_target_loss=delta_target_loss,
             use_prior=use_prior,
             max_grad_norm=max_grad_norm,
+            temporal_prior_weight=temporal_prior_weight,
+            slow_unroll_k=slow_unroll_k,
+            encoder=encoder,
         )
 
         if r_prev1 is not None and a_norm > 0:
@@ -310,4 +485,6 @@ def inference_kwargs(cfg):
         "delta_target_loss": t.get("delta_target_loss", True),
         "use_prior": inf.get("use_prior", True),
         "max_grad_norm": t.get("max_grad_norm", 1.0),
+        "temporal_prior_weight": inf.get("temporal_prior_weight", 0.01),
+        "slow_unroll_k": t.get("slow_unroll_k", 0),
     }

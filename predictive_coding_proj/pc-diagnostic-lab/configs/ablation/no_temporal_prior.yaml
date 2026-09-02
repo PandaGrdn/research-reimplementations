@@ -1,0 +1,4 @@
+arm: no_temporal_prior
+
+inference:
+  temporal_prior_weight: 0.0

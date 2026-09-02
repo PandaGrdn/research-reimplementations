@@ -84,17 +84,21 @@ def noise_floor_decomposition(settle_abs, target_abs):
     sigma = settle_abs / math.sqrt(2.0)
     noise_energy = 2.0 * (sigma ** 2)
     target_energy = target_abs ** 2
-    noise_share = float(min(1.0, noise_energy / (target_energy + 1e-12)))
-    predictable_fraction = float(max(0.0, 1.0 - noise_share))
+    noise_over_target = float(noise_energy / (target_energy + 1e-12))
+    noise_share = float(min(1.0, noise_over_target))
+    predictable_fraction = float(max(0.0, 1.0 - noise_over_target))
+    model_consistent = bool(noise_energy <= target_energy)
     return {
         "settle_abs": float(settle_abs),
         "sigma_settle": float(sigma),
         "target_abs": float(target_abs),
         "noise_energy": float(noise_energy),
         "target_energy": float(target_energy),
+        "noise_over_target": noise_over_target,
         "noise_share": noise_share,
         "signal_share": predictable_fraction,
         "predictable_fraction": predictable_fraction,
+        "model_consistent": model_consistent,
     }
 
 

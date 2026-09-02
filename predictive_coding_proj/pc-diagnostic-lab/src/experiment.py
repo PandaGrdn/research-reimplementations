@@ -4,8 +4,6 @@ import argparse
 import copy
 from pathlib import Path
 
-import torch
-
 from src.config import lab_root, resolve_config, scheduled_value
 from src.data import load_splits, sample_pretrain_frames
 from src.rollout import validate_hierarchical, validate_hierarchical_long
@@ -30,12 +28,13 @@ def parse_args(description):
     p.add_argument("--device", default=None)
     p.add_argument("--n-train", type=int, default=None)
     p.add_argument("--epochs", type=int, default=None)
+    p.add_argument("--overlay", nargs="+", default=None)
     return p.parse_args()
 
 
 def setup(args, n_seeds_key="n_seeds"):
     root = lab_root()
-    cfg = resolve_config(smoke=bool(args.smoke), root=root)
+    cfg = resolve_config(overlays=getattr(args, "overlay", None), smoke=bool(args.smoke), root=root)
     if args.device:
         cfg["device"] = args.device
     if args.n_train is not None:
@@ -67,10 +66,11 @@ def load_data(cfg, root, seed):
     return train, val, test, info
 
 
-def ensure_dictionary(cfg, train, device, root, log=print):
+def ensure_dictionary(cfg, train, device, root, log=print, seed=None):
+    seed = cfg["seed"] if seed is None else seed
     s = cfg["spatial"]
     ckpt = Path(root) / s.get("checkpoint", "artifacts/dictionary.pt")
-    key = dictionary_key(cfg)
+    key = dictionary_key(cfg, seed=seed)
     keyed = ckpt.with_name(f"{ckpt.stem}_{key}{ckpt.suffix}")
     path = keyed if keyed.exists() else ckpt
     if s.get("pretrain", True) and path.exists():
@@ -82,11 +82,12 @@ def ensure_dictionary(cfg, train, device, root, log=print):
             unfreeze_dictionary(deconvs)
         return deconvs, r_init, val_mse
 
+    seed_everything(seed)  # so r_init / deconv init differ per seed
     _, r_init, deconvs = make_from_cfg(cfg, device, image=train[0][:1])
     val_mse = None
     if s.get("pretrain", True):
         inf = cfg["inference"]
-        frames = sample_pretrain_frames(train, s.get("n_frames", 120), seed=0)
+        frames = sample_pretrain_frames(train, s.get("n_frames", 120), seed=seed)
         frames = [fr.to(device) for fr in frames]
         deconvs, val_mse, _ = pretrain_spatial(
             frames,
@@ -103,11 +104,15 @@ def ensure_dictionary(cfg, train, device, root, log=print):
             use_prior=inf.get("use_prior", True),
             log=log,
         )
-        save_dictionary(keyed, deconvs, r_init, cfg, val_mse)
+        save_dictionary(keyed, deconvs, r_init, cfg, val_mse, seed=seed)
         log(f"saved dictionary {keyed}")
     if s.get("freeze", True):
         freeze_dictionary(deconvs)
     return deconvs, r_init, val_mse
+
+
+def arm_name(cfg):
+    return cfg.get("arm", "baseline")
 
 
 def build_temporal(cfg, r_init, device):
@@ -129,6 +134,7 @@ def train_temporal_pc(
     val_seq=None,
     log=print,
     run_dir=None,
+    encoder=None,
 ):
     """Notebook-style epoch loop. Returns per-epoch motion_gap / delta_ratio history."""
     tcfg = cfg["temporal"]
@@ -166,6 +172,9 @@ def train_temporal_pc(
                 delta_target_loss=kw["delta_target_loss"],
                 use_prior=kw["use_prior"],
                 max_grad_norm=kw["max_grad_norm"],
+                temporal_prior_weight=kw["temporal_prior_weight"],
+                slow_unroll_k=kw["slow_unroll_k"],
+                encoder=encoder,
             )
             epoch_ratios.append(train_stats["ratio"])
         train_ratio = sum(epoch_ratios) / max(len(epoch_ratios), 1)
@@ -187,12 +196,16 @@ def train_temporal_pc(
                 deconvs,
                 temporal_nn,
                 use_prior=inf.get("use_prior", True),
+                temporal_prior_weight=inf.get("temporal_prior_weight", 0.01),
+                encoder=encoder,
                 log=log,
             )
             rec["val_mse"] = last_val["mse"]
             rec["motion_gap"] = last_val["motion_gap"]
             rec["delta_ratio"] = last_val["delta_ratio"]
             rec["mse_per_frame"] = last_val["mse_per_frame"]
+            rec["copy_last_mse"] = last_val["copy_last_mse"]
+            rec["mean_frame_mse"] = last_val["mean_frame_mse"]
             log(
                 f"[Epoch {epoch:03d}/{n_epochs:03d}]  r_noise={r_noise:.4f}  ss_p={ss_p:.3f}  "
                 f"Next-frame MSE: {last_val['mse']:.6f}  train_δ-ratio={train_ratio:.4f}  "
@@ -213,14 +226,19 @@ def train_temporal_pc(
     return temporal_nn, history, last_val
 
 
-def eval_long_rollouts(seqs, r_init, deconvs, temporal_nn, cfg, device, split_points=None, log=print, run_dir=None):
+def eval_long_rollouts(
+    seqs, r_init, deconvs, temporal_nn, cfg, device, split_points=None, log=print, run_dir=None, encoder=None
+):
     inf = cfg["inference"]
     tcfg = cfg["temporal"]
     split_points = split_points or cfg["eval"]["split_points"]
     n_eval = min(len(seqs), cfg["eval"].get("n_rollout_sequences", len(seqs)))
+    temporal_prior_weight = inf.get("temporal_prior_weight", 0.01)
     out = {}
     for sp in split_points:
         curves, long_mses, saturations = [], [], []
+        copy_last_long_vals, mean_frame_long_vals = [], []
+        copy_last_curves, mean_frame_curves = [], []
         last = None
         for seq in seqs[:n_eval]:
             last = validate_hierarchical_long(
@@ -236,10 +254,16 @@ def eval_long_rollouts(seqs, r_init, deconvs, temporal_nn, cfg, device, split_po
                 split_point=sp,
                 split_fix=tcfg.get("split_fix", False),
                 use_prior=inf.get("use_prior", True),
+                temporal_prior_weight=temporal_prior_weight,
+                encoder=encoder,
                 log=log,
             )
             curves.append(last["mse_per_frame"])
             long_mses.append(last["long_mse"])
+            copy_last_long_vals.append(last["copy_last_long_mse"])
+            mean_frame_long_vals.append(last["mean_frame_long_mse"])
+            copy_last_curves.append(last["copy_last_mse_per_frame"])
+            mean_frame_curves.append(last["mean_frame_mse_per_frame"])
             if last["saturation"] is not None:
                 saturations.append(last["saturation"])
         from src.metrics import stack_mean_std
@@ -247,11 +271,21 @@ def eval_long_rollouts(seqs, r_init, deconvs, temporal_nn, cfg, device, split_po
 
         mu, sd = stack_mean_std(curves)
         long_mu, long_sd = mean_std(long_mses)
+        cl_long_mu, cl_long_sd = mean_std(copy_last_long_vals)
+        mf_long_mu, mf_long_sd = mean_std(mean_frame_long_vals)
+        cl_curve_mu, _ = stack_mean_std(copy_last_curves)
+        mf_curve_mu, _ = stack_mean_std(mean_frame_curves)
         out[str(sp)] = {
             "mse_per_frame_mean": mu,
             "mse_per_frame_std": sd,
             "long_mse_mean": long_mu,
             "long_mse_std": long_sd,
+            "copy_last_long_mse_mean": cl_long_mu,
+            "copy_last_long_mse_std": cl_long_sd,
+            "mean_frame_long_mse_mean": mf_long_mu,
+            "mean_frame_long_mse_std": mf_long_sd,
+            "copy_last_mse_per_frame_mean": cl_curve_mu,
+            "mean_frame_mse_per_frame_mean": mf_curve_mu,
             "n": n_eval,
             "saturation": saturations[0] if saturations else None,
         }

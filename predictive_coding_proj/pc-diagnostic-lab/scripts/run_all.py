@@ -9,6 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 EXPERIMENTS = [
+    "experiments/c0_isolation_test.py",
     "experiments/c1_rollout_collapse.py",
     "experiments/c2_mitigation_grid.py",
     "experiments/c3_copy_detection.py",
@@ -17,6 +18,7 @@ EXPERIMENTS = [
     "experiments/c6_noise_floor.py",
     "experiments/c7_slowness_sweep.py",
     "experiments/c8_amortized_contrast.py",
+    "experiments/c9_predictability.py",
 ]
 
 

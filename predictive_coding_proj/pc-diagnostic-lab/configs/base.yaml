@@ -17,3 +17,37 @@ eval:
   n_determinism_frames: 20
   split_points: [5, 10, 15]
   headline_split: 10
+
+c8:
+  arms: ["iterative", "amortized_init_settle", "amortized"]
+  refine_iters: 20
+
+c0:
+  conv_tol: 1.0e-4
+  max_iters: 2000
+  perturb: 0.01
+
+c9:
+  n_train_sequences: 24
+  steps: 300
+  context: 2
+  models: ["linear", "conv"]
+  shifts: [[1, 0], [2, 0], [4, 0], [0, 1], [0, 2], [3, 3]]
+  n_translation_frames: 20
+
+c4:
+  iters: [50, 200, 800, 2000]
+  lr_r: [0.02]
+  init_noise: [0.0, 0.001, 0.01, 0.1]
+  use_prior: [true]
+
+c5:
+  iters: [50, 200, 800]
+
+c7:
+  lambda_slow: [0.0, 0.1, 0.5, 1.0, 2.0, 5.0]
+  unroll_k: [0, 5]
+
+ladder:
+  arms: [baseline, zero_init, complete_dict, no_temporal_prior]
+  only: [c1, c5, c9]
