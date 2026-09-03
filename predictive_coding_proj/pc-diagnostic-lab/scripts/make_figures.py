@@ -551,6 +551,21 @@ def fig_c9(m, out):
     save(fig, out, "fig_c9")
 
 
+def fig_c10(m, out):
+    """C10 writes the inspection grids itself; copy seq 0 into figures/fig_c10."""
+    gallery = m.get("gallery") or []
+    if not gallery:
+        return
+    src = ROOT / gallery[0]["path"]
+    if not src.exists():
+        return
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    import shutil
+    shutil.copy2(src, out / "fig_c10.png")
+    print(f"wrote {out / 'fig_c10'}")
+
+
 FIGURES = {
     "c1_rollout_collapse": fig_c1,
     "c2_mitigation_grid": fig_c2,
@@ -562,6 +577,7 @@ FIGURES = {
     "c8_amortized_contrast": fig_c8,
     "c9_predictability": fig_c9,
     "c0_isolation_test": fig_c0,
+    "c10_rollout_gallery": fig_c10,
     "ladder": fig_ladder,
 }
 

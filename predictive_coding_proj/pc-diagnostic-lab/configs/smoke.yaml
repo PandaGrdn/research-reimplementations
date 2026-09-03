@@ -68,3 +68,6 @@ c9:
   models: ["linear"]
   shifts: [[2, 0], [1, 0]]
   n_translation_frames: 2
+
+c10:
+  n_sequences: 1

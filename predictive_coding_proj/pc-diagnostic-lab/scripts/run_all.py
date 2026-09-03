@@ -19,6 +19,7 @@ EXPERIMENTS = [
     "experiments/c7_slowness_sweep.py",
     "experiments/c8_amortized_contrast.py",
     "experiments/c9_predictability.py",
+    "experiments/c10_rollout_gallery.py",
 ]
 
 

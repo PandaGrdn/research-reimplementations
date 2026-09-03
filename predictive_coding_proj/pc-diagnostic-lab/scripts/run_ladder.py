@@ -45,6 +45,7 @@ EXP_MAP = {
     "c7": "c7_slowness_sweep",
     "c8": "c8_amortized_contrast",
     "c9": "c9_predictability",
+    "c10": "c10_rollout_gallery",
 }
 
 DEFAULT_ARMS = ["baseline", "zero_init", "complete_dict", "no_temporal_prior"]

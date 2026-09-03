@@ -4,6 +4,8 @@ import argparse
 import copy
 from pathlib import Path
 
+import torch
+
 from src.config import lab_root, resolve_config, scheduled_value
 from src.data import load_splits, sample_pretrain_frames
 from src.rollout import validate_hierarchical, validate_hierarchical_long
@@ -29,6 +31,7 @@ def parse_args(description):
     p.add_argument("--n-train", type=int, default=None)
     p.add_argument("--epochs", type=int, default=None)
     p.add_argument("--overlay", nargs="+", default=None)
+    p.add_argument("--ckpt", default=None, help="load a saved temporal.pt and skip training")
     return p.parse_args()
 
 
@@ -122,6 +125,35 @@ def build_temporal(cfg, r_init, device):
         delta_scale=t.get("delta_scale", 1.0),
         delta_bounded=t.get("delta_bounded", True),
     ).to(device)
+
+
+def save_temporal_checkpoint(path, temporal_nn, cfg, seed=0):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        {
+            "temporal_state": temporal_nn.state_dict(),
+            "temporal": cfg.get("temporal"),
+            "inference": cfg.get("inference"),
+            "spatial": cfg.get("spatial"),
+            "seed": seed,
+            "dictionary_key": dictionary_key(cfg, seed=seed),
+        },
+        path,
+    )
+    return path
+
+
+def load_temporal_checkpoint(path, r_init, cfg, device):
+    path = Path(path)
+    try:
+        ckpt = torch.load(path, map_location=device, weights_only=False)
+    except TypeError:
+        ckpt = torch.load(path, map_location=device)
+    model = build_temporal(cfg, r_init, device)
+    model.load_state_dict(ckpt["temporal_state"])
+    model.eval()
+    return model
 
 
 def train_temporal_pc(
@@ -222,6 +254,10 @@ def train_temporal_pc(
             context=1,
             path=Path(run_dir) / "tf_panel.png",
             n_show=min(8, last_val["true_frames"].shape[0]),
+        )
+    if run_dir is not None:
+        save_temporal_checkpoint(
+            Path(run_dir) / "temporal.pt", temporal_nn, cfg, seed=cfg.get("seed", 0)
         )
     return temporal_nn, history, last_val
 
