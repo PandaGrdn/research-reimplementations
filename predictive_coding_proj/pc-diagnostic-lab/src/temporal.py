@@ -199,6 +199,87 @@ class TemporalConvRNN(nn.Module):
 TemporalNN = TemporalConvRNN
 
 
+class CoupledTopDownRNN(nn.Module):
+    """ConvGRU + zero-init readout on the TOP layer only; every lower layer's
+    prediction is generated top-down through the dictionary:
+
+        r_pred[top]   = r_in[top] + delta_top          (the only learned part)
+        r_pred[i]     = f_clamp(deconvs[i+1](r_pred[i+1]))   for i = top-1 .. 0
+
+    By construction the inter-layer consistency error
+    e1 = r_pred[0] - f_clamp(deconvs[1](r_pred[1])) is exactly zero for every
+    window (bit-identical, not merely encouraged by a loss term) — unlike
+    `TemporalConvRNN`, whose layers have independent cells/readouts and
+    nothing tying them together.
+
+    The deconv weights get NO gradient here: lower layers are generated via
+    `F.conv_transpose2d(..., deconv.weight.detach(), ...)`, so gradients flow
+    only into r_pred[top] (the GRU's own prediction), never into the
+    dictionary — regardless of whether the dictionary itself is frozen.
+    `deconvs` is stored as a plain Python list attribute, not an
+    `nn.ModuleList` submodule, so `state_dict()` only ever contains the top
+    GRU cell + readout: the dictionary is never part of this model's
+    checkpoint (the checkpoint loader must be handed it separately).
+
+    Same `init_hidden` / `forward` signatures and list-shaped outputs as
+    `TemporalConvRNN`. `deltas` is `[zeros_like(r_in[i]) for i < top] +
+    [delta_top]` (only the top layer ever has a nonzero delta).
+    """
+
+    def __init__(self, r, deconvs, delta_scale=1.0, delta_bounded=True):
+        super().__init__()
+        self.delta_scale = delta_scale
+        self.delta_bounded = delta_bounded
+        self.num_layers = len(r)
+        self.deconvs = list(deconvs)  # plain list: NOT registered as a submodule
+        top = self.num_layers - 1
+        top_ch = r[top].shape[1]
+        self.top_cell = ConvGRUCell(top_ch)
+        top_readout = nn.Conv2d(top_ch, top_ch, kernel_size=3, padding=1)
+        nn.init.zeros_(top_readout.weight)
+        nn.init.zeros_(top_readout.bias)
+        self.top_readout = top_readout
+
+    def init_hidden(self, r_like):
+        return [torch.zeros_like(ri) for ri in r_like]
+
+    def _generate_top_down(self, r_pred_top):
+        """r_pred[i] for i = top-1 .. 0, no grad into the dictionary weights."""
+        preds = [None] * self.num_layers
+        preds[self.num_layers - 1] = r_pred_top
+        for i in range(self.num_layers - 2, -1, -1):
+            deconv = self.deconvs[i + 1]
+            raw = F.conv_transpose2d(
+                preds[i + 1],
+                deconv.weight.detach(),
+                bias=None,
+                stride=deconv.stride,
+                padding=deconv.padding,
+            )
+            preds[i] = f_clamp(raw)
+        return preds
+
+    def forward(self, r_in, hidden=None):
+        if hidden is None:
+            hidden = self.init_hidden(r_in)
+        top = self.num_layers - 1
+        h_t = self.top_cell(r_in[top], hidden[top])
+        raw = self.top_readout(h_t)
+        if self.delta_bounded:
+            delta_top = self.delta_scale * torch.tanh(raw)
+        else:
+            delta_top = raw
+        r_pred_top = r_in[top] + delta_top
+        r_pred = self._generate_top_down(r_pred_top)
+
+        h_new = list(hidden)
+        h_new[top] = h_t
+
+        deltas = [torch.zeros_like(r_in[i]) for i in range(self.num_layers)]
+        deltas[top] = delta_top
+        return r_pred, h_new, deltas
+
+
 def _perturb_r(rs, noise_std):
     if noise_std is None or noise_std <= 0:
         return rs

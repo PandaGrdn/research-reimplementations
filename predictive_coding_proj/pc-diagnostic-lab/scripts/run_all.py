@@ -20,6 +20,9 @@ EXPERIMENTS = [
     "experiments/c8_amortized_contrast.py",
     "experiments/c9_predictability.py",
     "experiments/c10_rollout_gallery.py",
+    "experiments/c11_offline_gru.py",
+    "experiments/c12_energy_fade.py",
+    "experiments/c13_consistency_rollout.py",
 ]
 
 

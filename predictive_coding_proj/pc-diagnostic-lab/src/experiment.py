@@ -18,7 +18,7 @@ from src.spatial_pc import (
     save_dictionary,
     unfreeze_dictionary,
 )
-from src.temporal import TemporalConvRNN, inference_kwargs, train_video_sequence
+from src.temporal import CoupledTopDownRNN, TemporalConvRNN, inference_kwargs, train_video_sequence
 from src.utils import clone_r, get_device, seed_everything
 from src.viz import save_rollout_panel
 
@@ -130,6 +130,7 @@ def build_temporal(cfg, r_init, device):
 def save_temporal_checkpoint(path, temporal_nn, cfg, seed=0):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    model_kind = "coupled" if isinstance(temporal_nn, CoupledTopDownRNN) else "independent"
     torch.save(
         {
             "temporal_state": temporal_nn.state_dict(),
@@ -138,19 +139,43 @@ def save_temporal_checkpoint(path, temporal_nn, cfg, seed=0):
             "spatial": cfg.get("spatial"),
             "seed": seed,
             "dictionary_key": dictionary_key(cfg, seed=seed),
+            "model_kind": model_kind,
         },
         path,
     )
     return path
 
 
-def load_temporal_checkpoint(path, r_init, cfg, device):
+def load_temporal_checkpoint(path, r_init, cfg, device, deconvs=None):
+    """Loads either checkpoint kind, dispatching on the stored `model_kind`
+    ("independent" or "coupled"; missing key -> "independent", so pre-rework
+    checkpoints like artifacts/offline_gru_seed0.pt still load unchanged).
+    "coupled" checkpoints need `deconvs` (the dictionary) to reconstruct
+    `CoupledTopDownRNN`'s top-down generation — a missing `deconvs` there is
+    a caller bug, so it raises rather than silently building the wrong model.
+    """
     path = Path(path)
     try:
         ckpt = torch.load(path, map_location=device, weights_only=False)
     except TypeError:
         ckpt = torch.load(path, map_location=device)
-    model = build_temporal(cfg, r_init, device)
+    model_kind = ckpt.get("model_kind", "independent")
+    if model_kind == "coupled":
+        if deconvs is None:
+            raise ValueError(
+                f"checkpoint {path} is a coupled model (model_kind='coupled') but "
+                "load_temporal_checkpoint was not given `deconvs` — CoupledTopDownRNN "
+                "needs the dictionary to reconstruct its top-down lower-layer predictions."
+            )
+        t = cfg.get("temporal") or {}
+        model = CoupledTopDownRNN(
+            r_init,
+            deconvs,
+            delta_scale=t.get("delta_scale", 1.0),
+            delta_bounded=t.get("delta_bounded", True),
+        ).to(device)
+    else:
+        model = build_temporal(cfg, r_init, device)
     model.load_state_dict(ckpt["temporal_state"])
     model.eval()
     return model

@@ -551,6 +551,251 @@ def fig_c9(m, out):
     save(fig, out, "fig_c9")
 
 
+def fig_c11(m, out):
+    """C11 | left: test R² vs epoch for the independent vs coupled offline
+    GRUs (mean±std across seeds), against the two ceiling probes (matched to
+    C9's exact protocol vs minibatched full-scale). Right: teacher-forced
+    inter-layer error e1 for independent / coupled / the true codes
+    themselves — coupled is ~0 by construction (see src.temporal.
+    CoupledTopDownRNN), so a log scale keeps it visible next to the others.
+
+    Falls back to the old (pre-rework) single-curve schema when metrics.json
+    predates this rework (no "independent"/"coupled" keys), so the figure
+    still renders instead of crashing on a stale run.
+    """
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11.0, 3.8))
+    indep = m.get("independent")
+    coupled = m.get("coupled")
+
+    if indep is not None and coupled is not None:
+        for d, color, label in ((indep, "#4c72b0", "independent"), (coupled, "#c44e52", "coupled")):
+            y = np.asarray(d.get("history_mean") or [])
+            e = np.asarray(d.get("history_std") or [0.0] * len(y))
+            if len(y):
+                x = np.arange(len(y))
+                ax1.plot(x, y, marker="o", ms=3, color=color, label=label)
+                ax1.fill_between(x, y - e, y + e, color=color, alpha=0.15)
+
+        matched = m.get("probe_matched_r2_mean")
+        full = m.get("probe_full_best_r2_mean")
+        if matched is not None:
+            ax1.axhline(matched, color="k", ls="--", lw=1.2, label=f"probe matched (C9 ref) {matched:.2f}")
+        if full is not None:
+            ax1.axhline(full, color="#55a868", ls=":", lw=1.2, label=f"probe full {full:.2f}")
+        ax1.set_xlabel("epoch")
+        ax1.set_ylabel("R² vs copy-last")
+        ax1.set_title("test R² (mean±std across seeds)")
+        ax1.legend(fontsize=7)
+
+        names = ["independent", "coupled", "true codes"]
+        vals = [indep.get("e1_mean", 0.0), coupled.get("e1_mean", 0.0), m.get("true_e1_mean", 0.0)]
+        errs = [indep.get("e1_std", 0.0), coupled.get("e1_std", 0.0), m.get("true_e1_std", 0.0)]
+        colors = ["#4c72b0", "#c44e52", "#55a868"]
+        x = np.arange(len(names))
+        ax2.bar(x, [max(v, 1e-8) for v in vals], yerr=errs, capsize=3, color=colors, alpha=0.9)
+        ax2.set_yscale("log")
+        ax2.set_xticks(x)
+        ax2.set_xticklabels(names, rotation=15, ha="right")
+        ax2.set_ylabel("teacher-forced e1 (log)")
+        ax2.set_title("inter-layer consistency error")
+    else:
+        # backward-compatible fallback for the pre-rework single-model schema.
+        hist = m.get("history") or []
+        if hist:
+            xs = [h["epoch"] for h in hist]
+            ys = [h["test_r2"] for h in hist]
+            ax1.plot(xs, ys, marker="o", color="#4c72b0", label="offline GRU")
+        target = m.get("target_r2")
+        if target is not None:
+            ax1.axhline(target, color="k", ls="--", lw=1.2, label=f"target {target:.2f}")
+        avail = m.get("available_r2")
+        if avail is not None:
+            ax1.axhline(avail, color="#c44e52", ls=":", lw=1.2, label=f"C9 available {avail:.2f}")
+        ax1.set_xlabel("epoch")
+        ax1.set_ylabel("R² vs copy-last")
+        ax1.legend(fontsize=8)
+        ax2.axis("off")
+
+    fig.suptitle("C11  offline ConvGRU on eval-protocol codes: independent vs coupled top-down")
+    fig.tight_layout(rect=[0, 0, 1, 0.90])
+    save(fig, out, "fig_c11")
+
+
+def fig_c12(m, out):
+    """C12: (1) artificial-fade control (energy vs scale, no rollout) — the
+    baseline every claim below is read against; (2) independent model's
+    per-step e1_pred vs e1_true (the honest inter-layer signal) with
+    dc_offset on a twin axis (the artifact, now visible instead of hidden in
+    a total); (3) mass_pred / r_pred_norm vs step for independent vs coupled.
+    """
+    control = m.get("control") or {}
+    models = m.get("models") or {}
+    indep = models.get("independent") or {}
+    coupled = models.get("coupled") or {}
+    split = int(m.get("headline_split", 0) or 0)
+
+    fig, axes = plt.subplots(1, 3, figsize=(15.6, 3.8))
+
+    # Panel 1: control — energy vs scale, per term.
+    ax = axes[0]
+    per_scale = control.get("per_scale") or {}
+    scales = control.get("scales") or sorted((float(s) for s in per_scale), default=[])
+    if scales:
+        xs = np.asarray(scales)
+        for key, color, label in (
+            ("total", "#4c72b0", "total"),
+            ("e0", "#c44e52", "e0"),
+            ("e1", "#55a868", "e1"),
+        ):
+            ys = np.asarray([per_scale.get(str(s), {}).get(f"{key}_mean", np.nan) for s in scales])
+            es = np.asarray([per_scale.get(str(s), {}).get(f"{key}_std", 0.0) for s in scales])
+            ax.errorbar(xs, ys, yerr=es, marker="o", capsize=3, color=color, label=label)
+    ax.set_xlabel("contrast scale (0 = blank)")
+    ax.set_ylabel("PC energy")
+    ax.set_title(f"control: energy vs contrast (blank_is_minimum={control.get('blank_is_minimum')})")
+    ax.legend(fontsize=7)
+
+    # Panel 2: independent model — e1_pred vs e1_true, dc_offset on twin axis.
+    ax = axes[1]
+    curves = indep.get("curves") or {}
+    e1p = np.asarray(curves.get("pred_e1_mean") or [])
+    e1p_sd = np.asarray(curves.get("pred_e1_std") or [0.0] * len(e1p))
+    e1t = np.asarray(curves.get("true_e1_mean") or [])
+    e1t_sd = np.asarray(curves.get("true_e1_std") or [0.0] * len(e1t))
+    dc = np.asarray(curves.get("pred_dc_offset_mean") or [])
+    n = max(len(e1p), len(e1t), len(dc), 1)
+    x = np.arange(1, n + 1)
+    if len(e1p):
+        ax.plot(x[: len(e1p)], e1p, color="#c44e52", label="e1 pred")
+        ax.fill_between(x[: len(e1p)], e1p - e1p_sd, e1p + e1p_sd, color="#c44e52", alpha=0.15)
+    if len(e1t):
+        ax.plot(x[: len(e1t)], e1t, color="#4c72b0", label="e1 true")
+        ax.fill_between(x[: len(e1t)], e1t - e1t_sd, e1t + e1t_sd, color="#4c72b0", alpha=0.15)
+    ax.axvline(split, color="k", ls="--", lw=1, alpha=0.7)
+    ax.set_xlabel("frame t")
+    ax.set_ylabel("inter-layer energy e1")
+    ax2 = ax.twinx()
+    if len(dc):
+        ax2.plot(x[: len(dc)], dc, color="#8172b2", ls=":", label="dc_offset (pred)")
+    ax2.set_ylabel("dc_offset (pred decode mean)")
+    ax.set_title("independent: e1 pred vs true + DC artifact")
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, fontsize=7, loc="best")
+
+    # Panel 3: mass_pred and r_pred_norm vs step, independent vs coupled.
+    ax = axes[2]
+    ax2 = ax.twinx()
+    for name, payload, color in (
+        ("independent", indep, "#4c72b0"),
+        ("coupled", coupled if not coupled.get("skipped") else None, "#dd8452"),
+    ):
+        if not payload:
+            continue
+        c = payload.get("curves") or {}
+        mass_p = np.asarray(c.get("mass_pred_mean") or [])
+        rnorm_p = np.asarray(c.get("r_pred_norm_mean") or [])
+        nn = max(len(mass_p), len(rnorm_p), 1)
+        xs = np.arange(1, nn + 1)
+        if len(mass_p):
+            ax.plot(xs[: len(mass_p)], mass_p, color=color, label=f"mass_pred ({name})")
+        if len(rnorm_p):
+            ax2.plot(xs[: len(rnorm_p)], rnorm_p, color=color, ls="--", label=f"‖r_pred‖ ({name})")
+    ax.axvline(split, color="k", ls="--", lw=1, alpha=0.7)
+    ax.set_xlabel("frame t")
+    ax.set_ylabel("mass_pred (mean |pixel|)")
+    ax2.set_ylabel("‖r_pred‖ (dashed)")
+    ax.set_title("fade + latent-norm blowup: independent vs coupled")
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, fontsize=6, loc="best")
+
+    fig.suptitle("C12  per-term energy vs closed-loop fade, with artificial-fade control")
+    fig.tight_layout(rect=[0, 0, 1, 0.90])
+    save(fig, out, "fig_c12")
+
+
+_ARM_LABEL_C13 = {
+    "none": "none",
+    "consistency_top_down": "cons_td",
+    "consistency_bottom_up": "cons_bu",
+    "consistency_joint": "cons_joint",
+    "image_settle": "image",
+    "oracle_image": "oracle",
+}
+
+
+def fig_c13(m, out):
+    """C13: does settling the rolled-out code on the inter-layer consistency
+    term alone (no image term) reduce closed-loop drift, against the
+    pure-latent baseline (none) and the information-carrying upper reference
+    (oracle_image). (1) post-split pixel MSE per arm, independent vs coupled,
+    with the copy-last floor; (2) cos(r_used, r_true) vs step, all independent
+    arms; (3) mass_pred vs step for none / cons_td / image / oracle.
+    """
+    models = m.get("models") or {}
+    indep = (models.get("independent") or {}).get("arms") or {}
+    coupled = (models.get("coupled") or {}).get("arms") or {}
+    order = [a for a in _ARM_LABEL_C13 if a in indep]
+    labels = [_ARM_LABEL_C13[a] for a in order]
+    split = int(m.get("headline_split", 0) or 0)
+
+    fig, axes = plt.subplots(1, 3, figsize=(15.6, 3.8))
+
+    ax = axes[0]
+    if order:
+        x = np.arange(len(order))
+        w = 0.35
+        indep_vals = np.asarray([indep[a]["post_split"].get("pixel_mse", {}).get("mean", np.nan) for a in order])
+        ax.bar(x - w / 2, indep_vals, width=w, label="independent", color="#4c72b0")
+        if coupled:
+            coupled_vals = np.asarray([
+                coupled.get(a, {}).get("post_split", {}).get("pixel_mse", {}).get("mean", np.nan) for a in order
+            ])
+            ax.bar(x + w / 2, coupled_vals, width=w, label="coupled (e1≡0)", color="#dd8452")
+        floor = indep.get("none", {}).get("post_split", {}).get("copy_last_mse", {}).get("mean")
+        if floor is not None:
+            ax.axhline(floor, color="k", ls="--", lw=1.2, label=f"copy-last floor {floor:.3f}")
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, rotation=20, ha="right")
+    ax.set_ylabel("post-split pixel MSE")
+    ax.set_title("closed-loop pixel MSE by arm")
+    ax.legend(fontsize=7)
+
+    ax = axes[1]
+    cmap = plt.get_cmap("tab10")
+    for i, a in enumerate(order):
+        curve = np.asarray((indep[a].get("curves") or {}).get("cos_r_mean") or [])
+        if len(curve):
+            ax.plot(np.arange(1, len(curve) + 1), curve, color=cmap(i), label=_ARM_LABEL_C13[a])
+    ax.axvline(split, color="k", ls="--", lw=1, alpha=0.7)
+    ax.set_xlabel("frame t")
+    ax.set_ylabel("cos(r_used, r_true)")
+    ax.set_ylim(-0.05, 1.02)
+    ax.set_title("latent cosine drift by arm (independent)")
+    ax.legend(fontsize=6)
+
+    ax = axes[2]
+    focus = [a for a in ("none", "consistency_top_down", "image_settle", "oracle_image") if a in indep]
+    for i, a in enumerate(focus):
+        curve = np.asarray((indep[a].get("curves") or {}).get("mass_pred_mean") or [])
+        if len(curve):
+            ax.plot(np.arange(1, len(curve) + 1), curve, color=cmap(i), label=_ARM_LABEL_C13[a])
+    if focus:
+        mass_true = np.asarray((indep[focus[0]].get("curves") or {}).get("mass_true_mean") or [])
+        if len(mass_true):
+            ax.plot(np.arange(1, len(mass_true) + 1), mass_true, color="k", ls=":", lw=1.3, label="true")
+    ax.axvline(split, color="k", ls="--", lw=1, alpha=0.7)
+    ax.set_xlabel("frame t")
+    ax.set_ylabel("mean |pixel|")
+    ax.set_title("fade (mass_pred) by arm")
+    ax.legend(fontsize=6)
+
+    fig.suptitle("C13  consistency-only test-time settle of the closed-loop code")
+    fig.tight_layout(rect=[0, 0, 1, 0.90])
+    save(fig, out, "fig_c13")
+
+
 def fig_c10(m, out):
     """C10 writes the inspection grids itself; copy seq 0 into figures/fig_c10."""
     gallery = m.get("gallery") or []
@@ -578,6 +823,9 @@ FIGURES = {
     "c9_predictability": fig_c9,
     "c0_isolation_test": fig_c0,
     "c10_rollout_gallery": fig_c10,
+    "c11_offline_gru": fig_c11,
+    "c12_energy_fade": fig_c12,
+    "c13_consistency_rollout": fig_c13,
     "ladder": fig_ladder,
 }
 

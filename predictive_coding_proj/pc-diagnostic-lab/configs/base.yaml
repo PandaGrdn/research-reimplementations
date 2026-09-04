@@ -54,3 +54,22 @@ ladder:
 
 c10:
   n_sequences: 4
+
+c11:
+  epochs: 30
+  lr: 1.0e-3
+  n_train_sequences: 300
+  n_test_sequences: 32
+  probe_epochs: 20
+
+c12:
+  n_sequences: 32
+  n_control_frames: 20
+  fade_scales: [1.0, 0.75, 0.5, 0.25, 0.1, 0.0]
+  settle_iters: 200
+
+c13:
+  n_sequences: 32
+  iters: 50
+  arms: ["none", "consistency_top_down", "consistency_bottom_up", "consistency_joint", "image_settle", "oracle_image"]
+  fallback_epochs: 5

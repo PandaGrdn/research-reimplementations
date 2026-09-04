@@ -17,6 +17,7 @@ from src.rollout import validate_hierarchical, validate_hierarchical_long
 from src.spatial_pc import freeze_dictionary, make_variables, pretrain_spatial
 from src.inference import settle_grounded, settle_info, settle_with_temporal_prior
 from src.spatial_pc import unfreeze_dictionary
+from src.offline_gru import energy_fade_rollout, train_offline_gru
 from src.temporal import (
     TemporalConvRNN,
     settle_with_temporal_prior_unrolled,
@@ -233,6 +234,35 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(all(not ri.requires_grad for ri in r_out))
         self.assertTrue(all(torch.isfinite(ri).all() for ri in r_out))
 
+    def test_offline_gru_trains_and_reports_r2(self):
+        image, r, deconvs = _tiny_dict()
+        codes = []
+        for _ in range(2):
+            seq = []
+            for t in range(4):
+                seq.append([ri + 0.05 * t * torch.randn_like(ri) for ri in r])
+            codes.append(seq)
+        net = TemporalConvRNN(r, delta_scale=1.0)
+        hist = train_offline_gru(net, codes, codes, epochs=2, lr=1e-3, device=torch.device("cpu"), log=lambda *_: None)
+        self.assertEqual(len(hist), 2)
+        self.assertTrue(math.isfinite(hist[-1]["test_r2"]))
+
+    def test_energy_fade_rollout_length(self):
+        image, r, deconvs = _tiny_dict()
+        freeze_dictionary(deconvs)
+        net = TemporalConvRNN(r, delta_scale=1.0)
+        seq = torch.randn(5, 1, 16, 16) * 0.1
+        cfg = resolve_config(smoke=True, root=ROOT)
+        cfg["spatial"]["num_layers"] = 2
+        cfg["inference"]["num_epochs_inner"] = 2
+        out = energy_fade_rollout(seq, r, deconvs, net, cfg, split_point=2)
+        self.assertEqual(len(out["steps"]), 4)
+        self.assertIn("energy_true", out["steps"][0])
+        self.assertIn("energy_faded", out["steps"][0])
+        self.assertIn("mass_pred", out["steps"][0])
+        self.assertTrue(out["steps"][0]["closed_loop"] is False)
+        self.assertTrue(out["steps"][-1]["closed_loop"] is True)
+
     def test_split_fix_flag_changes_wiring(self):
         image, r, deconvs = _tiny_dict()
         freeze_dictionary(deconvs)
@@ -430,6 +460,59 @@ class CoreTests(unittest.TestCase):
                 },
                 "predictability_primary_model": "linear",
             },
+            "c10_rollout_gallery": {"gallery": []},
+            "c11_offline_gru": {
+                "independent": {
+                    "history_mean": [-0.31, -0.08],
+                    "history_std": [0.02, 0.02],
+                    "e1_mean": 3.37,
+                    "e1_std": 0.1,
+                },
+                "coupled": {
+                    "history_mean": [-3.16, -3.34],
+                    "history_std": [0.05, 0.05],
+                    "e1_mean": 0.0,
+                    "e1_std": 0.0,
+                    "layer0_r2_mean": -3.13,
+                    "layer1_r2_mean": -11.0,
+                },
+                "probe_matched_r2_mean": -8.97,
+                "probe_full_best_r2_mean": -12.36,
+                "true_e1_mean": 3.72,
+                "true_e1_std": 0.1,
+            },
+            "c12_energy_fade": {
+                "headline_split": 2,
+                "control": {
+                    "per_scale": {
+                        "0.0": {"total_mean": 0.0, "total_std": 0.0, "e0_mean": 0.0, "e0_std": 0.0, "e1_mean": 0.0, "e1_std": 0.0},
+                        "0.5": {"total_mean": 12.56, "total_std": 0.02, "e0_mean": 12.31, "e0_std": 0.02, "e1_mean": 0.25, "e1_std": 0.0},
+                        "1.0": {"total_mean": 50.24, "total_std": 0.09, "e0_mean": 49.23, "e0_std": 0.09, "e1_mean": 1.01, "e1_std": 0.0},
+                    },
+                    "scales": [0.0, 0.5, 1.0],
+                    "blank_is_minimum": True,
+                    "energy_at_scale": {"0.0": 0.0, "0.5": 12.56, "1.0": 50.24},
+                },
+                "models": {
+                    "independent": {
+                        "curves": {
+                            "pred_e1_mean": [0.5, 0.7, 0.9, 1.1],
+                            "pred_e1_std": [0.0, 0.0, 0.0, 0.0],
+                            "true_e1_mean": [0.25, 0.25, 0.25, 0.25],
+                            "true_e1_std": [0.0, 0.0, 0.0, 0.0],
+                            "pred_dc_offset_mean": [-0.05, -0.1, -0.2, -0.35],
+                            "mass_pred_mean": [0.19, 0.15, 0.08, 0.03],
+                            "r_pred_norm_mean": [3.0, 2.5, 2.1, 5.7],
+                        },
+                        "e1_ratio_post": 2.8,
+                        "e1_ratio_pre": 1.0,
+                        "dc_artifact_share_post": 0.4,
+                        "fade_then_diverge": True,
+                        "energy_norm_tracks_fade": True,
+                    },
+                    "coupled": {"skipped": True, "reason": "no checkpoint"},
+                },
+            },
             "c9_predictability": {
                 "predictability": {
                     "linear": {
@@ -448,6 +531,71 @@ class CoreTests(unittest.TestCase):
                             "layers": [{"layer": 0, "cos_mean": 0.76, "exact_expected": False, "aliased": True}],
                         },
                     ]
+                },
+            },
+            "c13_consistency_rollout": {
+                "headline_split": 2,
+                "models": {
+                    "independent": {
+                        "arms": {
+                            "none": {
+                                "post_split": {
+                                    "pixel_mse": {"mean": 0.09, "delta_vs_none": 0.0},
+                                    "cos_r": {"mean": -0.05, "delta_vs_none": 0.0},
+                                    "copy_last_mse": {"mean": 0.11},
+                                },
+                                "curves": {
+                                    "cos_r_mean": [1.0, 0.68, 0.4, 0.13],
+                                    "mass_pred_mean": [0.19, 0.15, 0.08, 0.03],
+                                    "mass_true_mean": [0.2, 0.2, 0.21, 0.2],
+                                },
+                                "beat_none_count": 0,
+                                "beat_none_total": 1,
+                            },
+                            "consistency_top_down": {
+                                "post_split": {
+                                    "pixel_mse": {"mean": 0.08, "delta_vs_none": -0.01},
+                                    "cos_r": {"mean": 0.1, "delta_vs_none": 0.15},
+                                    "copy_last_mse": {"mean": 0.11},
+                                },
+                                "curves": {
+                                    "cos_r_mean": [1.0, 0.72, 0.5, 0.25],
+                                    "mass_pred_mean": [0.19, 0.16, 0.1, 0.05],
+                                    "mass_true_mean": [0.2, 0.2, 0.21, 0.2],
+                                },
+                                "beat_none_count": 1,
+                                "beat_none_total": 1,
+                            },
+                            "image_settle": {
+                                "post_split": {
+                                    "pixel_mse": {"mean": 0.09, "delta_vs_none": 0.0},
+                                    "cos_r": {"mean": -0.03, "delta_vs_none": 0.02},
+                                    "copy_last_mse": {"mean": 0.11},
+                                },
+                                "curves": {
+                                    "cos_r_mean": [1.0, 0.69, 0.41, 0.14],
+                                    "mass_pred_mean": [0.19, 0.15, 0.08, 0.03],
+                                    "mass_true_mean": [0.2, 0.2, 0.21, 0.2],
+                                },
+                                "beat_none_count": 0,
+                                "beat_none_total": 1,
+                            },
+                            "oracle_image": {
+                                "post_split": {
+                                    "pixel_mse": {"mean": 0.02, "delta_vs_none": -0.07},
+                                    "cos_r": {"mean": 0.9, "delta_vs_none": 0.95},
+                                    "copy_last_mse": {"mean": 0.11},
+                                },
+                                "curves": {
+                                    "cos_r_mean": [1.0, 0.95, 0.92, 0.9],
+                                    "mass_pred_mean": [0.2, 0.2, 0.2, 0.19],
+                                    "mass_true_mean": [0.2, 0.2, 0.21, 0.2],
+                                },
+                                "beat_none_count": 1,
+                                "beat_none_total": 1,
+                            },
+                        },
+                    },
                 },
             },
             "ladder": {
@@ -475,7 +623,8 @@ class CoreTests(unittest.TestCase):
             for exp, fn in make_figures.FIGURES.items():
                 fn(_load_or_fallback(exp), td)
             for name in ("fig_c0", "fig_c1", "fig_c2", "fig_c3", "fig_c4", "fig_c5",
-                         "fig_c6", "fig_c7", "fig_c8", "fig_c9", "fig_ladder"):
+                         "fig_c6", "fig_c7", "fig_c8", "fig_c9", "fig_c11", "fig_c12",
+                         "fig_c13", "fig_ladder"):
                 self.assertTrue((Path(td) / f"{name}.pdf").exists())
                 self.assertTrue((Path(td) / f"{name}.png").exists())
 

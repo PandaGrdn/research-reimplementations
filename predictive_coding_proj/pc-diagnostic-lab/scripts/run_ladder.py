@@ -46,6 +46,8 @@ EXP_MAP = {
     "c8": "c8_amortized_contrast",
     "c9": "c9_predictability",
     "c10": "c10_rollout_gallery",
+    "c11": "c11_offline_gru",
+    "c12": "c12_energy_fade",
 }
 
 DEFAULT_ARMS = ["baseline", "zero_init", "complete_dict", "no_temporal_prior"]

@@ -71,3 +71,21 @@ c9:
 
 c10:
   n_sequences: 1
+
+c11:
+  epochs: 2
+  n_train_sequences: 2
+  n_test_sequences: 1
+  probe_epochs: 1
+
+c12:
+  n_sequences: 1
+  n_control_frames: 2
+  fade_scales: [1.0, 0.5, 0.0]
+  settle_iters: 2
+
+c13:
+  n_sequences: 1
+  iters: 2
+  arms: ["none", "consistency_top_down", "image_settle", "oracle_image"]
+  fallback_epochs: 1
