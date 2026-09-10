@@ -26,6 +26,8 @@ def validate_hierarchical(
     deconvs,
     temporal_nn,
     use_prior=True,
+    temporal_prior_weight=0.01,
+    encoder=None,
     log=print,
 ):
     """Teacher-forced next-frame validation (notebook validate_heirarchical)."""
@@ -39,6 +41,7 @@ def validate_hierarchical(
 
     true_frames = []
     pred_frames = []
+    all_curr = []
     I_prev = None
     delta_norms, dr_norms = [], []
     mse_vs_curr, mse_vs_prev = [], []
@@ -63,21 +66,24 @@ def validate_hierarchical(
                 if I_prev is not None:
                     mse_vs_prev.append(torch.mean((I_hat - I_prev) ** 2).item())
 
-            for _ in range(num_epochs_inner):
-                e_spatial[0] = I_curr - f_clamp(deconvs[0](r_curr[0]))
-                for i in range(1, num_layers):
-                    e_spatial[i] = r_curr[i - 1] - f_clamp(deconvs[i](r_curr[i]))
-                for i in range(num_layers):
-                    cauchy_prior = alpha * (2 * r_curr[i] / (1 + r_curr[i] ** 2)) if use_prior else 0.0
-                    bottom_up = F.conv2d(
-                        e_spatial[i], deconvs[i].weight, padding=deconvs[i].padding, stride=deconvs[i].stride
-                    )
-                    dr = (1.0 / sigma_2) * bottom_up - cauchy_prior - (1.0 / (sigma_2 * 100)) * (
-                        r_curr[i] - r_pred[i]
-                    )
-                    if i < num_layers - 1:
-                        dr = dr - (1.0 / sigma_2) * e_spatial[i + 1]
-                    r_curr[i] = (r_curr[i] + lr_r * dr).detach()
+            if encoder is not None:
+                r_curr = [ri.detach() for ri in encoder(I_curr)]
+            else:
+                for _ in range(num_epochs_inner):
+                    e_spatial[0] = I_curr - f_clamp(deconvs[0](r_curr[0]))
+                    for i in range(1, num_layers):
+                        e_spatial[i] = r_curr[i - 1] - f_clamp(deconvs[i](r_curr[i]))
+                    for i in range(num_layers):
+                        cauchy_prior = alpha * (2 * r_curr[i] / (1 + r_curr[i] ** 2)) if use_prior else 0.0
+                        bottom_up = F.conv2d(
+                            e_spatial[i], deconvs[i].weight, padding=deconvs[i].padding, stride=deconvs[i].stride
+                        )
+                        dr = (1.0 / sigma_2) * bottom_up - cauchy_prior - (temporal_prior_weight / sigma_2) * (
+                            r_curr[i] - r_pred[i]
+                        )
+                        if i < num_layers - 1:
+                            dr = dr - (1.0 / sigma_2) * e_spatial[i + 1]
+                        r_curr[i] = (r_curr[i] + lr_r * dr).detach()
 
             if t >= 1:
                 d_norm = 0.0
@@ -90,6 +96,7 @@ def validate_hierarchical(
 
         hidden = [hi.detach() for hi in h_new]
         r_prev1 = clone_r(r_curr)
+        all_curr.append(I_curr.detach().clone())
         I_prev = I_curr.detach().clone()
 
     true_frames = torch.stack(true_frames, dim=0)
@@ -98,6 +105,17 @@ def validate_hierarchical(
     mse_per_frame = torch.mean((true_frames - pred_frames) ** 2, dim=(1, 2, 3, 4))
     ratio, mean_delta, mean_dr = delta_ratio(delta_norms, dr_norms)
     gap, mean_mse_curr, mean_mse_prev = motion_gap(mse_vs_curr, mse_vs_prev)
+
+    copy_last_mse_per_frame, mean_frame_mse_per_frame = [], []
+    frame_sum = None
+    for t in range(1, T):
+        frame_sum = all_curr[t - 1] if frame_sum is None else frame_sum + all_curr[t - 1]
+        mean_ref = frame_sum / t
+        copy_last_mse_per_frame.append(float(torch.mean((all_curr[t] - all_curr[t - 1]) ** 2).item()))
+        mean_frame_mse_per_frame.append(float(torch.mean((all_curr[t] - mean_ref) ** 2).item()))
+    copy_last_mse = float(sum(copy_last_mse_per_frame) / max(len(copy_last_mse_per_frame), 1))
+    mean_frame_mse = float(sum(mean_frame_mse_per_frame) / max(len(mean_frame_mse_per_frame), 1))
+
     log(
         f"Identity check | ||delta||={mean_delta:.6f}  ||r_t-r_(t-1)||={mean_dr:.6f}  "
         f"ratio={ratio:.4f}  delta_scale={temporal_nn.delta_scale}"
@@ -122,6 +140,10 @@ def validate_hierarchical(
         "mean_mse_curr": mean_mse_curr,
         "mean_mse_prev": mean_mse_prev,
         "copy_last": gap > 0,
+        "copy_last_mse_per_frame": copy_last_mse_per_frame,
+        "mean_frame_mse_per_frame": mean_frame_mse_per_frame,
+        "copy_last_mse": copy_last_mse,
+        "mean_frame_mse": mean_frame_mse,
     }
 
 
@@ -138,6 +160,8 @@ def validate_hierarchical_long(
     split_point=10,
     split_fix=False,
     use_prior=True,
+    temporal_prior_weight=0.01,
+    encoder=None,
     log=print,
 ):
     """Closed-loop rollout. split_fix selects the r_prev1 bookkeeping branch.
@@ -153,6 +177,7 @@ def validate_hierarchical_long(
     hidden = temporal_nn.init_hidden(r_init)
     r_curr = clone_r(r_init)
     true_frames, pred_frames = [], []
+    all_curr = []
     saturation = None
 
     for t in range(T):
@@ -187,21 +212,24 @@ def validate_hierarchical_long(
                 I_obs = I_curr
 
             if split_fix or t < split_point:
-                for _ in range(num_epochs_inner):
-                    e_spatial[0] = I_obs - f_clamp(deconvs[0](r_curr[0]))
-                    for i in range(1, num_layers):
-                        e_spatial[i] = r_curr[i - 1] - f_clamp(deconvs[i](r_curr[i]))
-                    for i in range(num_layers):
-                        cauchy_prior = alpha * (2 * r_curr[i] / (1 + r_curr[i] ** 2)) if use_prior else 0.0
-                        bottom_up = F.conv2d(
-                            e_spatial[i], deconvs[i].weight, padding=deconvs[i].padding, stride=deconvs[i].stride
-                        )
-                        dr = (1.0 / sigma_2) * bottom_up - cauchy_prior - (1.0 / (sigma_2 * 100)) * (
-                            r_curr[i] - r_pred[i]
-                        )
-                        if i < num_layers - 1:
-                            dr = dr - (1.0 / sigma_2) * e_spatial[i + 1]
-                        r_curr[i] = (r_curr[i] + lr_r * dr).detach()
+                if encoder is not None:
+                    r_curr = [ri.detach() for ri in encoder(I_obs)]
+                else:
+                    for _ in range(num_epochs_inner):
+                        e_spatial[0] = I_obs - f_clamp(deconvs[0](r_curr[0]))
+                        for i in range(1, num_layers):
+                            e_spatial[i] = r_curr[i - 1] - f_clamp(deconvs[i](r_curr[i]))
+                        for i in range(num_layers):
+                            cauchy_prior = alpha * (2 * r_curr[i] / (1 + r_curr[i] ** 2)) if use_prior else 0.0
+                            bottom_up = F.conv2d(
+                                e_spatial[i], deconvs[i].weight, padding=deconvs[i].padding, stride=deconvs[i].stride
+                            )
+                            dr = (1.0 / sigma_2) * bottom_up - cauchy_prior - (temporal_prior_weight / sigma_2) * (
+                                r_curr[i] - r_pred[i]
+                            )
+                            if i < num_layers - 1:
+                                dr = dr - (1.0 / sigma_2) * e_spatial[i + 1]
+                            r_curr[i] = (r_curr[i] + lr_r * dr).detach()
             else:
                 r_curr = clone_r(r_pred)
 
@@ -210,18 +238,37 @@ def validate_hierarchical_long(
             r_prev1 = clone_r(r_pred)
         else:
             r_prev1 = clone_r(r_curr)
+        all_curr.append(I_curr.detach().clone())
 
     true_frames = torch.stack(true_frames, dim=0)
     pred_frames = torch.stack(pred_frames, dim=0)
     mse = torch.mean((true_frames - pred_frames) ** 2)
     mse_per_frame = torch.mean((true_frames - pred_frames) ** 2, dim=(1, 2, 3, 4))
     curve = [float(x) for x in mse_per_frame.detach().cpu()]
+
+    mean_ref_long = torch.stack(all_curr[:split_point], dim=0).mean(dim=0)
+    copy_last_mse_per_frame, mean_frame_mse_per_frame = [], []
+    for t in range(1, T):
+        ref_idx = min(t - 1, split_point - 1)
+        copy_last_mse_per_frame.append(float(torch.mean((all_curr[t] - all_curr[ref_idx]) ** 2).item()))
+        mean_frame_mse_per_frame.append(float(torch.mean((all_curr[t] - mean_ref_long) ** 2).item()))
+    copy_last_mse = float(sum(copy_last_mse_per_frame) / max(len(copy_last_mse_per_frame), 1))
+    mean_frame_mse = float(sum(mean_frame_mse_per_frame) / max(len(mean_frame_mse_per_frame), 1))
+    copy_last_long_mse = long_horizon_mean(copy_last_mse_per_frame, split_point)
+    mean_frame_long_mse = long_horizon_mean(mean_frame_mse_per_frame, split_point)
+
     return {
         "mse": float(mse.detach()),
         "mse_per_frame": curve,
         "true_frames": true_frames,
         "pred_frames": pred_frames,
         "r_curr": r_curr,
+        "copy_last_mse_per_frame": copy_last_mse_per_frame,
+        "mean_frame_mse_per_frame": mean_frame_mse_per_frame,
+        "copy_last_mse": copy_last_mse,
+        "mean_frame_mse": mean_frame_mse,
+        "copy_last_long_mse": copy_last_long_mse,
+        "mean_frame_long_mse": mean_frame_long_mse,
         "split_point": split_point,
         "split_fix": split_fix,
         "saturation": saturation,

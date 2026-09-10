@@ -193,7 +193,7 @@ def unfreeze_dictionary(deconvs):
         d.weight.requires_grad = True
 
 
-def dictionary_key(cfg):
+def dictionary_key(cfg, seed=0):
     payload = {
         "spatial": cfg.get("spatial", {}),
         "inference": {
@@ -201,7 +201,7 @@ def dictionary_key(cfg):
             for k in ("alpha", "lambda_u", "lr_r", "lr_u", "sigma_2", "use_prior")
         },
             "n_train": cfg.get("data", {}).get("n_train"),
-            "pretrain_seed": 0,
+            "pretrain_seed": seed,
     }
     blob = json.dumps(payload, sort_keys=True, default=str).encode()
     return hashlib.sha256(blob).hexdigest()[:12]
@@ -217,7 +217,7 @@ def _layer_spec(deconv):
     }
 
 
-def save_dictionary(path, deconvs, r_init, cfg, val_mse=None):
+def save_dictionary(path, deconvs, r_init, cfg, val_mse=None, seed=0):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save(
@@ -227,7 +227,7 @@ def save_dictionary(path, deconvs, r_init, cfg, val_mse=None):
             "r_init": [ri.detach().cpu() for ri in r_init],
             "config": cfg.get("spatial"),
             "val_mse": val_mse,
-            "key": dictionary_key(cfg),
+            "key": dictionary_key(cfg, seed=seed),
         },
         path,
     )

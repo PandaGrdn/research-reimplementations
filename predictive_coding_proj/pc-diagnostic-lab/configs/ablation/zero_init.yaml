@@ -1,0 +1,4 @@
+arm: zero_init
+
+inference:
+  init_noise: 0.0

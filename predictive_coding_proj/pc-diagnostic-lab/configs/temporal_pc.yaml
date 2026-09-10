@@ -12,6 +12,7 @@ inference:
   init_noise: 0.01
   use_prior: true
   conv_tol: null
+  temporal_prior_weight: 0.01
 
 temporal:
   epochs: 20
@@ -28,15 +29,15 @@ temporal:
   split_fix: false
   max_grad_norm: 1.0
   freeze_dictionary: true
+  slow_unroll_k: 0
 
 amortized:
+  objective: energy
   epochs: 20
   lr: 0.001
   batch_size: 32
-  latent_channels: 32
+  hidden: 64
   kernel_size: 4
   stride: 2
   padding: 1
-  lambda_slow: 1.0
-  temporal_epochs: 10
-  temporal_lr: 0.002
+  lambda_slow: 0.0  

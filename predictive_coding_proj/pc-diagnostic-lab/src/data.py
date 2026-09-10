@@ -28,9 +28,14 @@ def load_splits(root, n_train, n_val, n_test, seed=0):
     n_total = n_train + n_val + n_test
     if n_total > len(raw):
         raise ValueError(f"need {n_total} sequences, dataset has {len(raw)}")
-    train = [prep_seq(raw[i]) for i in range(n_train)]
-    val = [prep_seq(raw[n_train + i]) for i in range(n_val)]
-    test = [prep_seq(raw[n_train + n_val + i]) for i in range(n_test)]
+    g = torch.Generator().manual_seed(seed)
+    perm = torch.randperm(len(raw), generator=g)[:n_total].tolist()
+    train_idx = perm[:n_train]
+    val_idx = perm[n_train:n_train + n_val]
+    test_idx = perm[n_train + n_val:n_train + n_val + n_test]
+    train = [prep_seq(raw[i]) for i in train_idx]
+    val = [prep_seq(raw[i]) for i in val_idx]
+    test = [prep_seq(raw[i]) for i in test_idx]
     info = {
         "n_train": n_train,
         "n_val": n_val,
@@ -38,6 +43,7 @@ def load_splits(root, n_train, n_val, n_test, seed=0):
         "T": int(train[0].shape[0]),
         "shape": tuple(int(x) for x in train[0].shape),
         "split_hash": split_hash(train, val, test),
+        "indices_hash": indices_hash(train_idx + val_idx + test_idx),
         "seed": seed,
     }
     return train, val, test, info
@@ -50,6 +56,12 @@ def split_hash(train, val, test):
         if seqs:
             h.update(seqs[0].numpy().tobytes())
             h.update(seqs[-1].numpy().tobytes())
+    return h.hexdigest()[:16]
+
+
+def indices_hash(indices):
+    h = hashlib.sha256()
+    h.update(",".join(str(int(i)) for i in indices).encode())
     return h.hexdigest()[:16]
 
 

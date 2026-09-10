@@ -77,9 +77,10 @@ def write_yaml(path, obj):
         yaml.safe_dump(obj, f, sort_keys=False)
 
 
-def new_run_dir(root, exp_name):
+def new_run_dir(root, exp_name, arm=None):
     stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_dir = Path(root) / "results" / exp_name / stamp
+    suffix = f"_{arm}" if arm and arm != "baseline" else ""
+    run_dir = Path(root) / "results" / exp_name / f"{stamp}{suffix}"
     run_dir.mkdir(parents=True, exist_ok=True)
     latest = Path(root) / "results" / exp_name / "latest"
     if latest.is_symlink() or latest.exists():

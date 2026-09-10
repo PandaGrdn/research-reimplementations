@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from src.experiment import (
+    arm_name,
     build_temporal,
     ensure_dictionary,
     load_data,
@@ -22,7 +23,7 @@ from src.utils import finish_run, mean_std, new_run_dir, seed_everything
 def main():
     args = parse_args("C3 copy-last detection")
     root, cfg, device, seeds = setup(args)
-    run_dir = new_run_dir(root, "c3_copy_detection")
+    run_dir = new_run_dir(root, "c3_copy_detection", arm=arm_name(cfg))
     gap_curves, ratio_curves, final_gaps, final_ratios = [], [], [], []
     per_seed = []
 
