@@ -57,11 +57,10 @@ def collapse_onset(mse_curve, copy_last_curve, split_point):
     }
 
 
-def main():
-    args = parse_args("C1 rollout collapse")
-    root, cfg, device, seeds = setup(args)
-    run_dir = new_run_dir(root, "c1_rollout_collapse", arm=arm_name(cfg))
-    per_seed = []
+def aggregate(per_seed, cfg):
+    """Build the C1 metrics dict from per-seed records ({seed, history, long,
+    split_hash}). Pure function of the records, so run_parallel can merge
+    one-seed shards into exactly what a single multi-seed run reports."""
     by_split = {
         str(sp): {
             "curves": [],
@@ -74,29 +73,15 @@ def main():
         for sp in cfg["eval"]["split_points"]
     }
     tf_mse_vals, tf_copy_last_vals = [], []
-
-    for seed in seeds:
-        seed_everything(seed)
-        cfg["seed"] = seed
-        train, val, test, info = load_data(cfg, root, seed)
-        print(f"seed={seed}  {info['n_train']} train / {info['n_test']} test  hash={info['split_hash']}")
-        deconvs, r_init, _ = ensure_dictionary(cfg, train, device, root)
-        model = build_temporal(cfg, r_init, device)
-        seed_dir = run_dir / f"seed{seed}"
-        seed_dir.mkdir(parents=True, exist_ok=True)
-        model, history, _ = train_temporal_pc(
-            train, r_init, deconvs, model, cfg, device, val_seq=val[0], log=print, run_dir=seed_dir
-        )
-        long = eval_long_rollouts(test, r_init, deconvs, model, cfg, device, log=print, run_dir=seed_dir)
-        rec = {"seed": seed, "history": history, "long": long, "split_hash": info["split_hash"]}
-        per_seed.append(rec)
-        for sp, payload in long.items():
+    for rec in per_seed:
+        for sp, payload in rec["long"].items():
             by_split[sp]["curves"].append(payload["mse_per_frame_mean"])
             by_split[sp]["long"].append(payload["long_mse_mean"])
             by_split[sp]["copy_last_long"].append(payload["copy_last_long_mse_mean"])
             by_split[sp]["mean_frame_long"].append(payload["mean_frame_long_mse_mean"])
             by_split[sp]["copy_last_curve"].append(payload["copy_last_mse_per_frame_mean"])
             by_split[sp]["mean_frame_curve"].append(payload["mean_frame_mse_per_frame_mean"])
+        history = rec["history"]
         if history:
             last_epoch = history[-1]
             if "val_mse" in last_epoch:
@@ -138,9 +123,9 @@ def main():
     summary = (
         f"C1 | split={headline_sp} long MSE {h['long_mse_mean']:.4f} ± {h['long_mse_std']:.4f} "
         f"| copy-last floor {h['copy_last_long_mse_mean']:.4f} | mean-frame floor {h['mean_frame_long_mse_mean']:.4f} "
-        f"| tf MSE at last epoch {tf_mse_mean:.4f} (copy-last {tf_copy_last_mean:.4f}) | n_seeds={len(seeds)}"
+        f"| tf MSE at last epoch {tf_mse_mean:.4f} (copy-last {tf_copy_last_mean:.4f}) | n_seeds={len(per_seed)}"
     )
-    metrics = {
+    return {
         "claim": "C1",
         "seeds": per_seed,
         "split_points": splits,
@@ -152,7 +137,31 @@ def main():
         "collapse_onset": onset,
         "summary": summary,
     }
-    finish_run(run_dir, cfg, metrics, root=root, summary=summary)
+
+
+def main():
+    args = parse_args("C1 rollout collapse")
+    root, cfg, device, seeds = setup(args)
+    run_dir = new_run_dir(root, "c1_rollout_collapse", arm=arm_name(cfg))
+    per_seed = []
+
+    for seed in seeds:
+        seed_everything(seed)
+        cfg["seed"] = seed
+        train, val, test, info = load_data(cfg, root, seed)
+        print(f"seed={seed}  {info['n_train']} train / {info['n_test']} test  hash={info['split_hash']}")
+        deconvs, r_init, _ = ensure_dictionary(cfg, train, device, root)
+        model = build_temporal(cfg, r_init, device)
+        seed_dir = run_dir / f"seed{seed}"
+        seed_dir.mkdir(parents=True, exist_ok=True)
+        model, history, _ = train_temporal_pc(
+            train, r_init, deconvs, model, cfg, device, val_seq=val[0], log=print, run_dir=seed_dir
+        )
+        long = eval_long_rollouts(test, r_init, deconvs, model, cfg, device, log=print, run_dir=seed_dir)
+        per_seed.append({"seed": seed, "history": history, "long": long, "split_hash": info["split_hash"]})
+
+    metrics = aggregate(per_seed, cfg)
+    finish_run(run_dir, cfg, metrics, root=root, summary=metrics["summary"])
 
 
 if __name__ == "__main__":

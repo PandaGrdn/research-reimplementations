@@ -77,22 +77,37 @@ def write_yaml(path, obj):
         yaml.safe_dump(obj, f, sort_keys=False)
 
 
-def new_run_dir(root, exp_name, arm=None):
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    suffix = f"_{arm}" if arm and arm != "baseline" else ""
-    run_dir = Path(root) / "results" / exp_name / f"{stamp}{suffix}"
-    run_dir.mkdir(parents=True, exist_ok=True)
+def link_latest(root, exp_name, run_dir):
+    run_dir = Path(run_dir)
     latest = Path(root) / "results" / exp_name / "latest"
-    if latest.is_symlink() or latest.exists():
-        if latest.is_symlink() or latest.is_file():
-            latest.unlink()
-        elif latest.is_dir() and not any(latest.iterdir()):
-            latest.rmdir()
+    if latest.is_symlink() or latest.is_file():
+        latest.unlink()
+    elif latest.is_dir() and not any(latest.iterdir()):
+        latest.rmdir()
     try:
-        latest.symlink_to(run_dir.name)
+        if run_dir.parent.resolve() == latest.parent.resolve():
+            latest.symlink_to(run_dir.name)
+        else:
+            latest.symlink_to(run_dir.resolve())
     except OSError:
         latest.mkdir(parents=True, exist_ok=True)
-        (latest / ".target").write_text(str(run_dir))
+        (latest / ".target").write_text(str(run_dir.resolve()))
+    return latest
+
+
+def new_run_dir(root, exp_name, arm=None):
+    override = os.environ.get("PC_LAB_RUN_DIR")
+    if override:
+        run_dir = Path(override)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        if os.environ.get("PC_LAB_SKIP_LATEST") == "1":
+            return run_dir
+    else:
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        suffix = f"_{arm}" if arm and arm != "baseline" else ""
+        run_dir = Path(root) / "results" / exp_name / f"{stamp}{suffix}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+    link_latest(root, exp_name, run_dir)
     return run_dir
 
 

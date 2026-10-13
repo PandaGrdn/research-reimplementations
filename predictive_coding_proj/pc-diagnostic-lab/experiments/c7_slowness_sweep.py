@@ -157,6 +157,58 @@ def dictionary_drift(deconvs, ref_weights):
     return float(np.mean(drifts)) if drifts else float("nan")
 
 
+def summarize(sweep, lams):
+    """Build the C7 metrics dict from per-cell records (also used by run_parallel's merge)."""
+    lam_max = max(lams) if lams else float("nan")
+    def _span(unroll_k, key):
+        vals = [s[key] for s in sweep if s["unroll_k"] == unroll_k]
+        return (max(vals) - min(vals)) if vals else float("nan")
+
+    ks = sorted(set(s["unroll_k"] for s in sweep))
+    k0 = ks[0] if ks else 0
+    k_hi = ks[-1] if len(ks) > 1 else k0
+    plateau_span_k0 = _span(k0, "cons_cos_no_pull")
+    plateau_span_k5 = _span(k_hi, "cons_cos_no_pull")
+
+    def _range_str(unroll_k):
+        vals = sorted(
+            [(s["lambda_slow"], s["cons_cos_no_pull"]) for s in sweep if s["unroll_k"] == unroll_k],
+            key=lambda t: t[0],
+        )
+        if not vals:
+            return "n/a"
+        return f"{vals[0][1]:.3f}..{vals[-1][1]:.3f}"
+
+    def _drift_str(unroll_k):
+        vals = [s["dict_drift"] for s in sweep if s["unroll_k"] == unroll_k]
+        return f"{np.mean(vals):.4f}" if vals else "n/a"
+
+    summary = (
+        f"C7 | no gradient path (k={k0}): cons cos λ=0..{lam_max} → {_range_str(k0)} "
+        f"(span {plateau_span_k0:.3f}) | with path (k={k_hi}): → {_range_str(k_hi)} "
+        f"(span {plateau_span_k5:.3f}) | dict drift k0={_drift_str(k0)} k{k_hi}={_drift_str(k_hi)}"
+    )
+    return {
+        "claim": "C7",
+        "sweep": sweep,
+        "plateau_span_k0": plateau_span_k0,
+        "plateau_span_k5": plateau_span_k5,
+        "note": (
+            "unroll_k=0 uses settle_with_temporal_prior, which detaches r_curr every "
+            "step, so lambda_slow in the weight loss has zero gradient into the "
+            "dictionary or GRU (verified directly by grad_path=False via "
+            "slowness_has_dictionary_grad). unroll_k>0 uses "
+            "settle_with_temporal_prior_unrolled, which leaves the last unroll_k "
+            "steps un-detached, giving that term a real gradient path "
+            "(grad_path=True). no_pull isolates whether the dictionary itself "
+            "changed (settle_grounded, no slowness term); with_pull is what the "
+            "actual train/eval pipeline sees (settle_with_temporal_prior, "
+            "r_pred=r_prev1, this cell's lambda_slow)."
+        ),
+        "summary": summary,
+    }
+
+
 def main():
     args = parse_args("C7 slowness sweep (λ_slow × unroll_k)")
     root, cfg, device, seeds = setup(args)
@@ -286,53 +338,8 @@ def main():
                 f"with_pull cos={mu_wp:.4f}±{sd_wp:.4f}  drift={drift_mu:.4f}  grad_path={grad_path}"
             )
 
-    def _span(unroll_k, key):
-        vals = [s[key] for s in sweep if s["unroll_k"] == unroll_k]
-        return (max(vals) - min(vals)) if vals else float("nan")
-
-    ks = sorted(set(s["unroll_k"] for s in sweep))
-    k0 = ks[0] if ks else 0
-    k_hi = ks[-1] if len(ks) > 1 else k0
-    plateau_span_k0 = _span(k0, "cons_cos_no_pull")
-    plateau_span_k5 = _span(k_hi, "cons_cos_no_pull")
-
-    def _range_str(unroll_k):
-        vals = sorted(
-            [(s["lambda_slow"], s["cons_cos_no_pull"]) for s in sweep if s["unroll_k"] == unroll_k],
-            key=lambda t: t[0],
-        )
-        if not vals:
-            return "n/a"
-        return f"{vals[0][1]:.3f}..{vals[-1][1]:.3f}"
-
-    def _drift_str(unroll_k):
-        vals = [s["dict_drift"] for s in sweep if s["unroll_k"] == unroll_k]
-        return f"{np.mean(vals):.4f}" if vals else "n/a"
-
-    summary = (
-        f"C7 | no gradient path (k={k0}): cons cos λ=0..{lambdas(cfg)[-1]} → {_range_str(k0)} "
-        f"(span {plateau_span_k0:.3f}) | with path (k={k_hi}): → {_range_str(k_hi)} "
-        f"(span {plateau_span_k5:.3f}) | dict drift k0={_drift_str(k0)} k{k_hi}={_drift_str(k_hi)}"
-    )
-    metrics = {
-        "claim": "C7",
-        "sweep": sweep,
-        "plateau_span_k0": plateau_span_k0,
-        "plateau_span_k5": plateau_span_k5,
-        "note": (
-            "unroll_k=0 uses settle_with_temporal_prior, which detaches r_curr every "
-            "step, so lambda_slow in the weight loss has zero gradient into the "
-            "dictionary or GRU (verified directly by grad_path=False via "
-            "slowness_has_dictionary_grad). unroll_k>0 uses "
-            "settle_with_temporal_prior_unrolled, which leaves the last unroll_k "
-            "steps un-detached, giving that term a real gradient path "
-            "(grad_path=True). no_pull isolates whether the dictionary itself "
-            "changed (settle_grounded, no slowness term); with_pull is what the "
-            "actual train/eval pipeline sees (settle_with_temporal_prior, "
-            "r_pred=r_prev1, this cell's lambda_slow)."
-        ),
-        "summary": summary,
-    }
+    metrics = summarize(sweep, lambdas(cfg))
+    summary = metrics["summary"]
     finish_run(run_dir, cfg, metrics, root=root, summary=summary)
 
 

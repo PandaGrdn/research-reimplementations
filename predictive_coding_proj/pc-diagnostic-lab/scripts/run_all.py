@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Full diagnostic pipeline: dictionary → C1–C8 → figures."""
+"""Full diagnostic pipeline: dictionary → C0–C13 → figures.
+
+C1, C2, C3, C7 and C8 are dispatched through run_parallel.py (one process per
+seed, or per cell×seed for the grids) so a reporting-scale run is not a single
+multi-day process.
+"""
 
 import argparse
 import subprocess
@@ -25,9 +30,28 @@ EXPERIMENTS = [
     "experiments/c13_consistency_rollout.py",
 ]
 
+PARALLEL = {
+    "experiments/c1_rollout_collapse.py": "c1",
+    "experiments/c2_mitigation_grid.py": "c2",
+    "experiments/c3_copy_detection.py": "c3",
+    "experiments/c7_slowness_sweep.py": "c7",
+    "experiments/c8_amortized_contrast.py": "c8",
+}
+
 
 def run(cmd, extra):
     full = [sys.executable, str(ROOT / cmd)] + extra
+    print("\n>>>", " ".join(full), flush=True)
+    subprocess.check_call(full, cwd=str(ROOT))
+
+
+def run_parallel_claim(claim, extra, workers=None, device=None):
+    full = [sys.executable, str(ROOT / "scripts/run_parallel.py"), claim]
+    if workers is not None:
+        full += ["--workers", str(workers)]
+    if device:
+        full += ["--device", device]
+    full += extra
     print("\n>>>", " ".join(full), flush=True)
     subprocess.check_call(full, cwd=str(ROOT))
 
@@ -36,15 +60,29 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--smoke", action="store_true", help="tiny CPU overlay, <10 min")
     p.add_argument("--skip-figures", action="store_true")
-    p.add_argument("--only", nargs="*", default=None, help="subset of c1..c8")
+    p.add_argument("--only", nargs="*", default=None, help="subset of c0..c13")
+    p.add_argument("--device", default=None)
+    p.add_argument("--workers", type=int, default=None, help="parallel workers for C1/C2/C3/C7/C8")
+    p.add_argument("--reporting", action="store_true", help="C11–C13 n_sequences=100 overlay")
     args = p.parse_args()
     extra = ["--smoke"] if args.smoke else []
+    if args.reporting:
+        extra += ["--overlay", str(ROOT / "configs/reporting.yaml")]
+    if args.device:
+        extra += ["--device", args.device]
     wanted = set(args.only) if args.only else None
     for exp in EXPERIMENTS:
         tag = Path(exp).stem.split("_")[0]
         if wanted and tag not in wanted and Path(exp).stem not in wanted:
             continue
-        run(exp, extra)
+        claim = PARALLEL.get(exp)
+        if claim:
+            par_extra = ["--smoke"] if args.smoke else []
+            if args.reporting:
+                par_extra += ["--overlay", str(ROOT / "configs/reporting.yaml")]
+            run_parallel_claim(claim, par_extra, workers=args.workers, device=args.device)
+        else:
+            run(exp, extra)
     if not args.skip_figures:
         run("scripts/make_figures.py", [])
 

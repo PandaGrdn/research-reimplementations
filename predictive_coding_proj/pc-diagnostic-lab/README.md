@@ -29,7 +29,7 @@ the reporting floor (see "Scale" below); do not quote those runs either.
 
 ---
 
-## The argument (C0 → C9)
+## The argument (C0 → C13)
 
 Each claim is one script, one results directory, one figure. A reader can
 dispute any claim by rerunning exactly that script.
@@ -48,9 +48,8 @@ python experiments/c0_isolation_test.py
 ![fig_c0](figures/fig_c0.png)
 
 Headline number: `cos(true, synthetic)` at the handoff (and one step later).
-Low cosine with comparable convergence behavior on both means the two settle
-*targets* are simply different objects, not that settle is failing to
-converge on one of them.
+Low cosine with comparable convergence on both means the two settle *targets*
+are different objects, not that settle is failing to converge on one of them.
 
 ### C1 — the phenomenon
 
@@ -251,16 +250,13 @@ and something else is doing the damage.
 
 ### C9 — held-out predictability and translation consistency
 
-C5 shows the code is about as "non-smooth" (by cosine/L2) as pixels — but that
-measures geometry, not predictability, and pixels are perfectly predictable
-(translation) despite scoring the same on that geometry metric. C9 asks the
-sharper question directly: fit a small per-layer predictor
-(context window of past codes → next residual) and evaluate its **R² against
-a held-out copy-last floor** — for the code and, on the exact same windows,
-for raw pixels. It also checks whether the code co-translates (rolls) with a
-pure image shift at its own stride, i.e. whether the dictionary's translation
-equivariance survives settle (exact-stride shifts vs aliased/non-integer-
-stride shifts).
+C5 measures geometry (consecutive vs unrelated cosine/L2), not predictability.
+Pixels on Moving MNIST score about as "non-smooth" as the codes while remaining
+perfectly predictable (translation). C9 fits a small per-layer predictor
+(context window of past codes → next residual) and evaluates **R² against a
+held-out copy-last floor** — for the code and, on the exact same windows, for
+raw pixels. It also checks whether the code co-translates (rolls) with a pure
+image shift at its own stride.
 
 ```bash
 python experiments/c9_predictability.py
@@ -270,12 +266,111 @@ python experiments/c9_predictability.py
 
 Left: R² vs copy-last, code vs pixel, one bar pair per predictor (`linear`,
 `conv`). R² ≤ 0 means the predictor is not even as good as predicting no
-change; R² for pixels near the translation floor and R² for code near or
-below 0 is the sharpest version of "the code carries less predictable
-structure than the pixels it was derived from." Right: cosine between the
-shifted code and the rolled original code per shift, solid bars at exact
-strides, hatched bars at aliased (non-integer-stride) shifts, pixel cosine as
-a reference line.
+change. Right: cosine between the shifted code and the rolled original code
+per shift; pixel cosine as a reference line.
+
+### C10 — look at the pixels
+
+Saves the trained temporal net and writes inspection grids on held-out
+sequences: ground truth / teacher-forced / closed-loop AR / copy-last, so a
+human can see whether the C1 numbers are hiding a blur. Reuse a checkpoint
+instead of retraining with `--ckpt`.
+
+```bash
+python experiments/c10_rollout_gallery.py
+```
+
+![fig_c10](figures/fig_c10.png)
+
+One grid per sequence under `results/c10_rollout_gallery/<stamp>/gallery/`.
+Headline is seq 0 at the C1 split. If AR looks like a frozen last context
+frame, that is C3 in pixels.
+
+### C11 — offline ConvGRU ceiling on cached eval-protocol codes
+
+C1–C9 train the GRU online against a moving settle. C11 freezes the
+dictionary, caches the eval-protocol codes once, and trains two offline
+ConvGRUs on those codes: **independent** (`TemporalConvRNN`, one cell +
+readout per layer) and **coupled** (`CoupledTopDownRNN`, one cell on the top
+layer only; the bottom layer is generated top-down through the dictionary, so
+inter-layer error `e1` is exactly 0). Two predictability probes sit next to
+the C9 headline: `probe_matched` (C9's protocol) and `probe_full` (minibatch
+Adam over all train sequences). Also reports teacher-forced `e1` for both
+models and for the true settled codes.
+
+```bash
+python experiments/c11_offline_gru.py --seeds 0 1 2
+```
+
+![fig_c11](figures/fig_c11.png)
+
+Writes `artifacts/offline_gru_seed{k}.pt` and
+`artifacts/offline_gru_coupled_seed{k}.pt` — C12 and C13 load these. Headline:
+best test R² independent vs coupled, vs both probes, plus TF `e1`. If the
+probes disagree by >0.1, do not quote either alone.
+
+### C12 — per-term energy under closed-loop fade
+
+Does PC energy rise because the rollout is failing, or because energy is
+monotone in contrast (a faded digit is a cheaper reconstruction)? Three
+measurements per seed: (1) **contrast sweep** — settle from zero on
+`scale * I` with no rollout (the control); (2) **independent** closed-loop
+energy-fade using the C11 checkpoint; (3) **coupled** closed-loop energy-fade
+(`e1 ≡ 0` by construction). An earlier ~250 energy spike was a DC-centering
+artifact, not a reconstruction failure.
+
+```bash
+python experiments/c12_energy_fade.py
+```
+
+![fig_c12](figures/fig_c12.png)
+
+Read every rollout energy curve against the contrast-sweep control. Headline:
+does blank-frame energy sit at the minimum, and after the handoff does `e1`
+(pred/true) grow, or does normalized energy just track fade? Coupled `e1`
+staying at 0 is the reference for how much of the independent `e1` growth is
+a real coupling failure.
+
+### C13 — consistency-only test-time settle (the open question)
+
+C12 leaves open whether *doing something* with the inter-layer residual at
+test time can stop closed-loop fade. C13 is that experiment: after the
+handoff, settle the rolled-out code on the **inter-layer consistency term
+alone** — no image term. The decoded frame is a deterministic function of the
+code, so settling on it is information-free; only hierarchy + priors can
+help. Every arm shares the same teacher-forced prefix, then differs only
+after `split_point`:
+
+| arm | what is fed back as `r_prev` |
+|---|---|
+| `none` | pure latent `r_pred` (C12 baseline) |
+| `consistency_top_down` | settle `r0` with `r1` fixed |
+| `consistency_bottom_up` | settle `r1` with `r0` fixed |
+| `consistency_joint` | settle both layers |
+| `image_settle` | full settle on the model's **own** decode (info-free reference) |
+| `oracle_image` | full settle on the **true** frame (upper reference) |
+
+Both model kinds from C11. On the coupled model `e1` is 0 by construction, so
+the consistency arms are asserted no-ops (`e1_before < 1e-6`) — that
+assertion **is** the control.
+
+Default `c13.n_sequences` is 32, which is **below** the ≥100 held-out
+reporting floor even when `data.n_test: 100`. Set `c13.n_sequences: 100`
+before quoting.
+
+```bash
+python experiments/c13_consistency_rollout.py --seeds 0 1 2
+```
+
+![fig_c13](figures/fig_c13.png)
+
+Three panels: post-split pixel MSE per arm (independent vs coupled, copy-last
+floor), latent cosine drift vs step, fade (`mass_pred`) vs step. Headline:
+does any consistency arm beat `none` on post-split MSE, and by how much
+relative to `oracle_image`? If consistency cannot, and only the oracle
+(real pixels) can, the hierarchy has no unused consistency signal that
+test-time settle can recover — that is the resolution of the blog's open
+question.
 
 ---
 
@@ -372,25 +467,30 @@ produces are only as trustworthy as this list:
 ## Layout
 
 ```
-configs/            base + spatial_pc + temporal_pc + smoke + ablation/*.yaml
+configs/            base + spatial_pc + temporal_pc + smoke + reporting + ablation/*.yaml
 src/
-  data.py            MovingMNIST, fixed splits, seeded permutation + indices_hash
-  spatial_pc.py       deconv dictionary + pretrain, seeded dictionary_key
-  inference.py        settle_grounded + settle_info (energy/convergence) + C4/C5 diagnostics
-  temporal.py         ConvGRUCell, TemporalConvRNN, train_video_sequence, slow_unroll_k
-  rollout.py           teacher-forced + long rollout, copy-last/mean-frame floors, encoder= hook
+  data.py              MovingMNIST, fixed splits, seeded permutation + indices_hash
+  spatial_pc.py        deconv dictionary + pretrain, seeded dictionary_key
+  inference.py         settle_grounded + settle_info + C4/C5 diagnostics
+  temporal.py          ConvGRUCell, TemporalConvRNN, CoupledTopDownRNN, slow_unroll_k
+  rollout.py           teacher-forced + long rollout, copy-last/mean-frame floors
   metrics.py           pair stats, motion_gap, delta_ratio, unclamped noise-floor math
-  amortized.py         C8 encoder arm (PCEncoder onto the frozen dictionary)
-  predictability.py    C9 predictability R² + translation consistency (also used by C8)
-  experiment.py        shared CLI/config/training-loop plumbing (train_temporal_pc, ensure_dictionary, ...)
-experiments/         one script per claim (c0 .. c9)
+  amortized.py         C8 encoder arm
+  predictability.py    C9 R² + translation consistency
+  offline_gru.py       C11 cached-code GRUs
+  energy_fade.py       C12 contrast sweep + per-term energy
+  consistency_settle.py C13 inter-layer-only settle
+  experiment.py        shared CLI/config/training-loop plumbing
+experiments/           one script per claim (c0 … c13)
 scripts/
-  run_all.py           c0 → c9 → make_figures
-  run_ladder.py         one-variable-at-a-time ablation ladder
-  make_figures.py       every fig_cN + fig_ladder, from metrics.json only
+  run_all.py           c0 → c13 → make_figures (C2/C7 via run_parallel)
+  run_parallel.py      C1/C2/C3/C7/C8 fan-out + merge
+  farmshare_submit.sh  Slurm arrays for the same jobs
+  run_ladder.py        one-variable ablation ladder
+  make_figures.py      every fig_cN + fig_ladder, from metrics.json only
+colab_run_lab.ipynb    Colab GPU driver (clones repo, shells out to .py)
 results/<exp>/<timestamp>/metrics.json   (+ "latest" symlink)
-results/ladder/<timestamp>/metrics.json
-figures/fig_c0 … fig_c9, fig_ladder
+figures/fig_c0 … fig_c13, fig_ladder
 ```
 
 ## Setup
@@ -409,6 +509,115 @@ One claim:
 
 ```bash
 python experiments/c4_settle_determinism.py
+```
+
+Colab GPU (no need to convert scripts to notebooks): open `colab_run_lab.ipynb`,
+**Select Kernel → Colab → GPU**, run all cells. C2 / C7 are launched with
+`scripts/run_parallel.py` (one process per cell×seed). On one GPU keep
+`--workers 2`; on CPU use 4–8. `run_all.py` routes C2/C7 through that runner.
+
+```bash
+python scripts/run_parallel.py c2 --workers 8 --device cpu --seeds 0 1 2 --overlay configs/reporting.yaml
+python scripts/run_parallel.py c7 --workers 8 --device cpu --seeds 0 1 2
+```
+
+`configs/reporting.yaml` raises `eval.n_rollout_sequences` from 32 to the
+100-sequence floor; without it C1/C2/C3/C8 rollouts are scored on 32 sequences.
+
+Reporting-scale C2 is 9 cells × 3 seeds = 27 jobs; C7 is 2 × 6 × 3 = 36 jobs.
+One job is 1000 sequences × 20 epochs = 20,000 sequence passes of a
+single-threaded Python settle loop, so wall clock follows the number of fast
+cores, not the GPU. Measured on an Apple M5 (4 performance + 6 efficiency
+cores, on battery):
+
+| setup | sequences / s |
+|---|---|
+| 1 MPS process | 0.82 |
+| 4 CPU workers | 2.18 |
+| 8 CPU workers | 2.78 |
+| 8 CPU workers + 1 MPS | 3.07 |
+
+That projects to about 54 h for C2 and 89 h for C7 on that laptop. With one
+core per job (a cluster node, or a Slurm array) the grid takes roughly one job
+length: about 9 h on an M5 performance core, longer on slower cluster cores.
+
+Each job logs to `results/<exp>/<stamp>/shards/<job>/log.txt`. If jobs fail or
+the machine sleeps, rerun the same command with `--resume`; finished shards are
+skipped. The merge refuses an incomplete grid unless `--allow-partial`.
+
+```bash
+python scripts/run_parallel.py c2 --resume results/c2_mitigation_grid/STAMP --workers 8 --device cpu --seeds 0 1 2 --overlay configs/reporting.yaml
+```
+
+The same runner fans C1, C3 and C8 out one process per seed, and its merge is
+exactly what a sequential multi-seed run writes (`tests/test_parallel.py`
+compares every key):
+
+```bash
+python scripts/run_parallel.py c1 --workers 3 --device cpu --seeds 0 1 2 --overlay configs/reporting.yaml
+python scripts/run_parallel.py c8 --workers 3 --device cpu --seeds 0 1 2 --overlay configs/reporting.yaml
+```
+
+C3 needs no training once C1 has run under the same config. It trains the same
+model with the same seed and only reads the per-epoch `motion_gap` /
+`delta_ratio` that C1 already stores. It refuses a C1 run whose training config
+differs:
+
+```bash
+python experiments/c3_copy_detection.py --from-c1 results/c1_rollout_collapse/latest --overlay configs/reporting.yaml
+```
+
+### Slurm (Stanford FarmShare)
+
+`scripts/farmshare_submit.sh` submits, per experiment, one warmup job, one array
+with one single-core task per job, and one merge job. Every task of an
+experiment writes into `results/<exp>/farmshare`, so resubmitting the same
+command only reruns what is missing.
+
+```bash
+ssh SUNETID@login.farmshare.stanford.edu
+git clone https://github.com/PandaGrdn/research-reimplementations.git
+cd research-reimplementations/predictive_coding_proj/pc-diagnostic-lab
+bash scripts/farmshare_submit.sh setup             # venv, CPU torch, dataset, tests
+bash scripts/farmshare_submit.sh pilot             # one 1/10-scale job, to time a core
+bash scripts/farmshare_submit.sh run c1 c3 c2 c8   # 33 single-core tasks; c3 is read out of c1
+bash scripts/farmshare_submit.sh run c7            # 36 more
+squeue -u $USER
+```
+
+Then, from the laptop:
+
+```bash
+rsync -av --exclude 'shards/*/seed*' SUNETID@login.farmshare.stanford.edu:research-reimplementations/predictive_coding_proj/pc-diagnostic-lab/results/ results/
+python scripts/make_figures.py
+```
+
+There is no mid-job checkpoint, so the time limit must exceed one job. A full
+job is about 10x the pilot's elapsed time. `DRY_RUN=1` prints the `sbatch`
+commands without submitting. The script was exercised end to end against a
+stand-in `sbatch`, not on FarmShare itself; partition, time and module names are
+environment variables at the top of the script.
+
+By hand, the three steps are:
+
+
+```bash
+RUN=results/c2_mitigation_grid/farmshare
+python scripts/run_parallel.py c2 --warmup-only --device cpu
+# in the array script (#SBATCH --array=0-26 --cpus-per-task=1):
+python scripts/run_parallel.py c2 --resume $RUN --shard $SLURM_ARRAY_TASK_ID/27 --workers 1 --device cpu --overlay configs/reporting.yaml
+# when the array is done:
+python scripts/run_parallel.py c2 --merge-only $RUN --overlay configs/reporting.yaml
+```
+
+A merge must be given the same `--cells` / `--seeds` / `--smoke` / `--overlay`
+flags as the run, since they define which shards are expected.
+
+CPU sanity for the parallel path:
+
+```bash
+python tests/test_parallel.py
+python scripts/run_parallel.py c2 --smoke --cells baseline --seeds 0 --workers 2 --no-latest
 ```
 
 One claim under an ablation overlay:
@@ -436,6 +645,7 @@ CPU sanity (tiny data, should finish in well under a minute):
 python scripts/run_all.py --smoke
 python scripts/run_ladder.py --smoke --only c1 c5 c9
 python tests/test_smoke.py
+python tests/test_parallel.py
 ```
 
 Figures are generated **only** by `scripts/make_figures.py` from `metrics.json`.
@@ -452,6 +662,7 @@ Every run directory stores resolved YAML, git hash, and `pip freeze`.
 | pair-stat pairs | handful | ≥ 200 |
 | predictability train sequences (C9/C8) | 1 | ≥ 24 |
 | predictability test windows (C9/C8) | handful | ≥ 200 |
+| C11/C12/C13 eval sequences | 1 | ≥ 100 (`configs/reporting.yaml`; base C13 is 32) |
 | seeds (C0/C1/C2/C3/C7/C8, `n_seeds`) | 1 | 3 |
 | seeds (C4/C5/C6/C9, `n_seeds_inference`) | 1 | 5 |
 
@@ -475,12 +686,14 @@ Temporal training matches `temporal_predictive_coding.ipynb` `main()`:
   cells, `no_temporal_prior` / `strong_temporal_prior` ladder rungs) instead of
   leaving it hard-coded.
 
-The lab **pins a frozen spatially-pretrained dictionary** for C0–C6, C8, C9
+The lab **pins a frozen spatially-pretrained dictionary** for C0–C6 and C8–C13
 (cleaner isolation of the temporal failure). C7 unfreezes it on purpose, to
 test whether slowness can reshape the codebook once it has a real gradient
-path. The original notebook `main()` jointly trained an unfrozen dictionary
-from scratch; that is the one intentional protocol difference vs. the
-diagnostic cells, which already froze after spatial pretrain.
+path. C11–C13 further freeze the *codes*: they train or load offline GRUs on
+cached eval-protocol settles rather than the notebook's joint online loop. The
+original notebook `main()` jointly trained an unfrozen dictionary from scratch;
+that is the one intentional protocol difference vs. the diagnostic cells, which
+already froze after spatial pretrain.
 
 `validate_hierarchical_long` is exposed with both bookkeeping branches:
 
