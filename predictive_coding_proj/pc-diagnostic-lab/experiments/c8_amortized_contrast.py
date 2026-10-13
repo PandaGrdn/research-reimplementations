@@ -319,18 +319,15 @@ def run_arm(arm, cfg, train, val, test, r_init, deconvs, device, encoder, refine
     }
 
 
-def main():
-    args = parse_args("C8 amortized contrast")
-    root, cfg, device, seeds = setup(args)
-    run_dir = new_run_dir(root, "c8_amortized_contrast", arm=arm_name(cfg))
+def aggregate(per_seed, cfg):
+    """Build the C8 metrics dict from per-seed records ({seed, split_hash, arms,
+    pixel_reference, pixel_predictability}). Pure function of the records, so
+    run_parallel can merge one-seed shards into what a multi-seed run reports."""
     c8cfg = cfg.get("c8", {})
     arms = [a for a in ARM_ORDER if a in (c8cfg.get("arms") or ARM_ORDER)]
-    refine_iters = c8cfg.get("refine_iters", 20)
-    headline_sp = cfg["eval"].get("headline_split", 10)
     c9s = _c9_settings(cfg)
     primary_model = "conv" if "conv" in c9s["models"] else c9s["models"][0]
 
-    per_seed = []
     pooled = {a: {"cons": [], "un": []} for a in arms}
     series = {a: {k: [] for k in (
         "same_frame_cos", "cons_cos", "recon_mse", "energy", "tf_mse", "copy_last_mse", "mean_frame_mse",
@@ -341,49 +338,15 @@ def main():
     pixel_series = {"cons_cos": [], "un_cos": [], "frac_rel": []}
     by_construction = {}
 
-    for seed in seeds:
-        seed_everything(seed)
-        cfg["seed"] = seed
-        train, val, test, info = load_data(cfg, root, seed)
-        print(f"seed={seed}  {info['n_train']} train  hash={info['split_hash']}")
-        deconvs, r_init, _ = ensure_dictionary(cfg, train, device, root)
-
-        n_seq = cfg["eval"]["n_pair_sequences"]
-        pair_seqs = [s.to(device) for s in test[:n_seq]]
-        unrelated = [fr.to(device) for fr in collect_unrelated_frames(test, cfg["eval"]["n_unrelated_frames"])]
-        held_out_src = test[n_seq:] or test
-        held_out = [fr.to(device) for fr in collect_eval_frames(held_out_src, cfg["eval"]["n_determinism_frames"])]
-
-        px = pixel_reference(pair_seqs, unrelated, cfg["eval"]["max_unrelated_pairs"], generator=torch.Generator(device="cpu").manual_seed(seed))
+    for rec in per_seed:
+        px = rec["pixel_reference"]
         pixel_series["cons_cos"].append(px["cons_cos"])
         pixel_series["un_cos"].append(px["un_cos"])
         pixel_series["frac_rel"].append(px["frac_rel"])
-
-        # Pixel predictability reference: arm-independent (no code involved), so
-        # computed once per seed rather than inside run_arm.
-        train_pred_seqs = [s.to(device) for s in train[: c9s["n_train_sequences"]]]
-        train_pixels = pixel_codes(train_pred_seqs)
-        test_pixels = pixel_codes(pair_seqs)
-        pixel_predictability = {}
         for model in c9s["models"]:
-            r2 = predictability_r2(
-                train_pixels, test_pixels, device, context=c9s["context"], steps=c9s["steps"], model=model, seed=seed
-            )
-            pixel_predictability[model] = r2
-            pixel_pred_series[model].append(r2["r2_vs_copy_last"])
-
-        encoder = None
-        if "amortized" in arms or "amortized_init_settle" in arms:
-            encoder = build_encoder(cfg, r_init).to(device)
-            train_encoder(encoder, deconvs, train, cfg, device, r_init=r_init, log=print)
-
-        seed_arms = {}
+            pixel_pred_series[model].append(rec["pixel_predictability"][model]["r2_vs_copy_last"])
         for arm in arms:
-            out = run_arm(
-                arm, cfg, train, val, test, r_init, deconvs, device, encoder, refine_iters,
-                pair_seqs, unrelated, held_out, headline_sp, seed, train_pred_seqs,
-            )
-            seed_arms[arm] = out
+            out = rec["arms"][arm]
             for k in series[arm]:
                 if k == "cons_cos":
                     series[arm][k].append(out["smoothness"]["cons_cos"])
@@ -394,14 +357,6 @@ def main():
             by_construction[arm] = out["same_frame_cos_by_construction"]
             for model in c9s["models"]:
                 pred_series[arm][model].append(out["predictability"][model]["code"]["r2_vs_copy_last"])
-
-        per_seed.append({
-            "seed": seed,
-            "split_hash": info["split_hash"],
-            "arms": seed_arms,
-            "pixel_reference": px,
-            "pixel_predictability": pixel_predictability,
-        })
 
     arms_out = {}
     for arm in arms:
@@ -473,7 +428,7 @@ def main():
         f"recon {recon_parts} | "
         f"R² vs copy-last ({primary_model}) {pred_parts} (pixel {pixel_r2:.3f})"
     )
-    metrics = {
+    return {
         "claim": "C8",
         "arms_run": arms,
         "seeds": per_seed,
@@ -482,7 +437,69 @@ def main():
         "predictability_primary_model": primary_model,
         "summary": summary,
     }
-    finish_run(run_dir, cfg, metrics, root=root, summary=summary)
+
+
+def main():
+    args = parse_args("C8 amortized contrast")
+    root, cfg, device, seeds = setup(args)
+    run_dir = new_run_dir(root, "c8_amortized_contrast", arm=arm_name(cfg))
+    c8cfg = cfg.get("c8", {})
+    arms = [a for a in ARM_ORDER if a in (c8cfg.get("arms") or ARM_ORDER)]
+    refine_iters = c8cfg.get("refine_iters", 20)
+    headline_sp = cfg["eval"].get("headline_split", 10)
+    c9s = _c9_settings(cfg)
+
+    per_seed = []
+    for seed in seeds:
+        seed_everything(seed)
+        cfg["seed"] = seed
+        train, val, test, info = load_data(cfg, root, seed)
+        print(f"seed={seed}  {info['n_train']} train  hash={info['split_hash']}")
+        deconvs, r_init, _ = ensure_dictionary(cfg, train, device, root)
+
+        n_seq = cfg["eval"]["n_pair_sequences"]
+        pair_seqs = [s.to(device) for s in test[:n_seq]]
+        unrelated = [fr.to(device) for fr in collect_unrelated_frames(test, cfg["eval"]["n_unrelated_frames"])]
+        held_out_src = test[n_seq:] or test
+        held_out = [fr.to(device) for fr in collect_eval_frames(held_out_src, cfg["eval"]["n_determinism_frames"])]
+
+        px = pixel_reference(pair_seqs, unrelated, cfg["eval"]["max_unrelated_pairs"], generator=torch.Generator(device="cpu").manual_seed(seed))
+
+        # Pixel predictability reference: arm-independent (no code involved), so
+        # computed once per seed rather than inside run_arm.
+        train_pred_seqs = [s.to(device) for s in train[: c9s["n_train_sequences"]]]
+        train_pixels = pixel_codes(train_pred_seqs)
+        test_pixels = pixel_codes(pair_seqs)
+        pixel_predictability = {}
+        for model in c9s["models"]:
+            r2 = predictability_r2(
+                train_pixels, test_pixels, device, context=c9s["context"], steps=c9s["steps"], model=model, seed=seed
+            )
+            pixel_predictability[model] = r2
+
+        encoder = None
+        if "amortized" in arms or "amortized_init_settle" in arms:
+            encoder = build_encoder(cfg, r_init).to(device)
+            train_encoder(encoder, deconvs, train, cfg, device, r_init=r_init, log=print)
+
+        seed_arms = {}
+        for arm in arms:
+            out = run_arm(
+                arm, cfg, train, val, test, r_init, deconvs, device, encoder, refine_iters,
+                pair_seqs, unrelated, held_out, headline_sp, seed, train_pred_seqs,
+            )
+            seed_arms[arm] = out
+
+        per_seed.append({
+            "seed": seed,
+            "split_hash": info["split_hash"],
+            "arms": seed_arms,
+            "pixel_reference": px,
+            "pixel_predictability": pixel_predictability,
+        })
+
+    metrics = aggregate(per_seed, cfg)
+    finish_run(run_dir, cfg, metrics, root=root, summary=metrics["summary"])
 
 
 if __name__ == "__main__":

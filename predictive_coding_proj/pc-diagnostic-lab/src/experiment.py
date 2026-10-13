@@ -2,8 +2,11 @@
 
 import argparse
 import copy
+import os
+import random
 from pathlib import Path
 
+import numpy as np
 import torch
 
 from src.config import lab_root, resolve_config, scheduled_value
@@ -49,10 +52,12 @@ def setup(args, n_seeds_key="n_seeds"):
     seeds = args.seeds if args.seeds is not None else list(range(n_seeds))
     n_train = cfg["data"]["n_train"]
     n_test = cfg["data"]["n_test"]
-    if not args.smoke and (n_train < 1000 or n_test < 100):
+    n_rollout = cfg.get("eval", {}).get("n_rollout_sequences", n_test)
+    if not args.smoke and (n_train < 1000 or n_test < 100 or n_rollout < 100):
         print(
-            f"WARNING: n_train={n_train} n_test={n_test} is below the reporting floor "
-            f"(≥1000 train sequences, ≥100 held-out). Smoke/debug only — do not quote as a claim."
+            f"WARNING: n_train={n_train} n_test={n_test} eval.n_rollout_sequences={n_rollout} is below "
+            f"the reporting floor (≥1000 train sequences, ≥100 held-out; rollouts are scored on "
+            f"n_rollout_sequences — add --overlay configs/reporting.yaml). Do not quote as a claim."
         )
     return root, cfg, device, seeds
 
@@ -69,26 +74,49 @@ def load_data(cfg, root, seed):
     return train, val, test, info
 
 
+def _rng_snapshot():
+    snap = {"py": random.getstate(), "np": np.random.get_state(), "torch": torch.get_rng_state()}
+    if torch.cuda.is_available():
+        snap["cuda"] = torch.cuda.get_rng_state_all()
+    return snap
+
+
+def _rng_restore(snap, seed):
+    random.setstate(snap["py"])
+    np.random.set_state(snap["np"])
+    torch.set_rng_state(snap["torch"])
+    if "cuda" in snap:
+        torch.cuda.set_rng_state_all(snap["cuda"])
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        # The MPS generator cannot be snapshotted. Every script calls
+        # seed_everything(seed) right before ensure_dictionary, so reseeding
+        # puts it back where a cache hit would have left it.
+        torch.mps.manual_seed(seed)
+
+
 def ensure_dictionary(cfg, train, device, root, log=print, seed=None):
+    """Load the cached dictionary for this config and seed, pretraining it first
+    on a cache miss. A miss and a hit leave the caller in the same RNG state
+    and return the dictionary through the same load path, so a run's numbers do
+    not depend on whether the cache happened to be warm."""
     seed = cfg["seed"] if seed is None else seed
     s = cfg["spatial"]
     ckpt = Path(root) / s.get("checkpoint", "artifacts/dictionary.pt")
     key = dictionary_key(cfg, seed=seed)
     keyed = ckpt.with_name(f"{ckpt.stem}_{key}{ckpt.suffix}")
     path = keyed if keyed.exists() else ckpt
-    if s.get("pretrain", True) and path.exists():
-        deconvs, r_init, val_mse = load_dictionary(path, device)
-        log(f"loaded dictionary {path} val_mse={val_mse}")
+
+    if not s.get("pretrain", True):
+        seed_everything(seed)  # so r_init / deconv init differ per seed
+        _, r_init, deconvs = make_from_cfg(cfg, device, image=train[0][:1])
         if s.get("freeze", True):
             freeze_dictionary(deconvs)
-        else:
-            unfreeze_dictionary(deconvs)
-        return deconvs, r_init, val_mse
+        return deconvs, r_init, None
 
-    seed_everything(seed)  # so r_init / deconv init differ per seed
-    _, r_init, deconvs = make_from_cfg(cfg, device, image=train[0][:1])
-    val_mse = None
-    if s.get("pretrain", True):
+    if not path.exists():
+        rng = _rng_snapshot()
+        seed_everything(seed)  # so r_init / deconv init differ per seed
+        _, r_init, deconvs = make_from_cfg(cfg, device, image=train[0][:1])
         inf = cfg["inference"]
         frames = sample_pretrain_frames(train, s.get("n_frames", 120), seed=seed)
         frames = [fr.to(device) for fr in frames]
@@ -107,10 +135,20 @@ def ensure_dictionary(cfg, train, device, root, log=print, seed=None):
             use_prior=inf.get("use_prior", True),
             log=log,
         )
-        save_dictionary(keyed, deconvs, r_init, cfg, val_mse, seed=seed)
+        # Write-then-rename so a concurrent job never loads a half-written file.
+        tmp = keyed.with_name(f"{keyed.name}.{os.getpid()}.tmp")
+        save_dictionary(tmp, deconvs, r_init, cfg, val_mse, seed=seed)
+        os.replace(tmp, keyed)
         log(f"saved dictionary {keyed}")
+        _rng_restore(rng, seed)
+        path = keyed
+
+    deconvs, r_init, val_mse = load_dictionary(path, device)
+    log(f"loaded dictionary {path} val_mse={val_mse}")
     if s.get("freeze", True):
         freeze_dictionary(deconvs)
+    else:
+        unfreeze_dictionary(deconvs)
     return deconvs, r_init, val_mse
 
 

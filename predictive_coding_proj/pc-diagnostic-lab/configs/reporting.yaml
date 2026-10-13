@@ -1,0 +1,12 @@
+# Reporting-floor overrides. data.n_test is already 100 in base.yaml; these are
+# the knobs the experiment scripts actually slice on. base.yaml keeps
+# eval.n_rollout_sequences at 32, so C1/C2/C3/C8 rollouts need this overlay to
+# be scored on the full 100 held-out sequences.
+eval:
+  n_rollout_sequences: 100
+c11:
+  n_test_sequences: 100
+c12:
+  n_sequences: 100
+c13:
+  n_sequences: 100

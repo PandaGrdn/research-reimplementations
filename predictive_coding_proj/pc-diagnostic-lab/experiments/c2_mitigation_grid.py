@@ -57,6 +57,21 @@ def build_cell_cfg(cfg, cell):
     return overlay_temporal(cfg, **{k: v for k, v in cell.items() if k != "name"})
 
 
+def summarize(results, headline_sp):
+    """Build the C2 metrics dict from per-cell records (also used by run_parallel's merge)."""
+    baseline = next((r for r in results if r["name"] == "baseline"), None)
+    floor_ref = baseline or (results[0] if results else None)
+    summary = "C2 | " + "  ".join(f"{r['name']}={r['long_mse_mean']:.4f}" for r in results)
+    if baseline is not None:
+        summary += f"  (baseline {baseline['long_mse_mean']:.4f})"
+    if floor_ref is not None:
+        summary += (
+            f"  | copy-last floor {floor_ref['copy_last_long_mse_mean']:.4f} "
+            f"| mean-frame floor {floor_ref['mean_frame_long_mse_mean']:.4f}"
+        )
+    return {"claim": "C2", "headline_split": headline_sp, "cells": results, "summary": summary}
+
+
 def main():
     args = parse_args("C2 mitigation grid")
     root, cfg, device, seeds = setup(args)
@@ -98,21 +113,13 @@ def main():
             "mean_frame_long_mse_mean": mf_mu,
             "mean_frame_long_mse_std": mf_sd,
             "per_seed": long_vals,
+            "seeds": list(seeds),
         }
         results.append(rec)
         print(f"C2 | {cell['name']}: {mu:.4f} ± {sd:.4f}  (copy-last floor {cl_mu:.4f})")
 
-    baseline = next((r for r in results if r["name"] == "baseline"), None)
-    floor_ref = baseline or (results[0] if results else None)
-    summary = "C2 | " + "  ".join(f"{r['name']}={r['long_mse_mean']:.4f}" for r in results)
-    if baseline is not None:
-        summary += f"  (baseline {baseline['long_mse_mean']:.4f})"
-    if floor_ref is not None:
-        summary += (
-            f"  | copy-last floor {floor_ref['copy_last_long_mse_mean']:.4f} "
-            f"| mean-frame floor {floor_ref['mean_frame_long_mse_mean']:.4f}"
-        )
-    metrics = {"claim": "C2", "headline_split": headline_sp, "cells": results, "summary": summary}
+    metrics = summarize(results, headline_sp)
+    summary = metrics["summary"]
     finish_run(run_dir, cfg, metrics, root=root, summary=summary)
 
 
