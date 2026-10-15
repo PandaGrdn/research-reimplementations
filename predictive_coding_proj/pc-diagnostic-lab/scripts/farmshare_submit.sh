@@ -34,11 +34,14 @@ EXTRA="${EXTRA:---overlay configs/reporting.yaml}"
 VENV="${VENV:-$HOME/pc-lab-venv}"
 PYMOD="${PYMOD:-python/3.13.0}"
 DRY_RUN="${DRY_RUN:-0}"
-PYTHON="${PYTHON:-python}"
+# The venv's python by path, so the login-node steps work without activating it.
+if [ -z "${PYTHON:-}" ]; then
+  if [ -x "$VENV/bin/python" ]; then PYTHON="$VENV/bin/python"; else PYTHON=python; fi
+fi
 mkdir -p results/logs
 
 # Runs inside every job: environment, and one BLAS thread per allocated core.
-PREAMBLE="cd '$LAB'; if [ -f '$VENV/bin/activate' ]; then source '$VENV/bin/activate'; fi; export OMP_NUM_THREADS=\${SLURM_CPUS_PER_TASK:-1} MKL_NUM_THREADS=\${SLURM_CPUS_PER_TASK:-1}"
+PREAMBLE="cd '$LAB'; if [ -f '$VENV/bin/activate' ]; then . '$VENV/bin/activate'; fi; export PYTHONUNBUFFERED=1 OMP_NUM_THREADS=\${SLURM_CPUS_PER_TASK:-1} MKL_NUM_THREADS=\${SLURM_CPUS_PER_TASK:-1}"
 RUN="$PYTHON scripts/run_parallel.py"
 
 exp_name() {
@@ -114,6 +117,9 @@ cmd_run() {
     fi
     local n; n=$($RUN "$c" --seeds $SEEDS --count-jobs $EXTRA)
     local warm arr merge
+    # Create the run dir once, here. Many array tasks creating it at the same
+    # moment on NFS fail with "File exists" (seen on FarmShare).
+    [ "$DRY_RUN" = 1 ] || mkdir -p "$dir/shards"
     # c1 / c2 / c8 share one frozen-dictionary cache entry per seed; warm it once.
     # c7 unfreezes the dictionary, which is a different cache key.
     if [ "$c" != c7 ] && [ -n "$warm_frozen" ]; then

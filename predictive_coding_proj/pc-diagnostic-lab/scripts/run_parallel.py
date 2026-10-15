@@ -35,6 +35,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -207,12 +208,27 @@ def warmup_dictionaries(cfg, seeds, device):
         ensure_dictionary(cell_cfg, train, torch_dev, ROOT, seed=seed)
 
 
+def ensure_dir(path, tries=10):
+    """mkdir -p that survives many Slurm tasks creating the same directory at
+    once on NFS. There, mkdir can fail with EEXIST while a stale attribute cache
+    still says the directory is missing, which pathlib's exist_ok re-raises."""
+    path = Path(path)
+    for i in range(tries):
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+        except FileExistsError:
+            time.sleep(0.2 * (i + 1))
+            if path.is_dir():
+                return path
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 def run_job(claim, job, device, smoke, overlays, n_train, epochs, shard_root, threads=None):
-    shard_root = Path(shard_root)
-    shard_root.mkdir(parents=True, exist_ok=True)
+    shard_root = ensure_dir(shard_root)
     overlay, tag = write_job_overlay(shard_root, claim, job)
-    run_dir = shard_root / tag
-    run_dir.mkdir(parents=True, exist_ok=True)
+    run_dir = ensure_dir(shard_root / tag)
     script = ROOT / "experiments" / f"{EXP_NAME[claim]}.py"
     cmd = [sys.executable, str(script), "--seeds", str(job["seed"])]
     if device:
@@ -485,7 +501,7 @@ def main(argv=None):
         parent = Path(args.resume).resolve()
     else:
         parent = ROOT / "results" / EXP_NAME[claim] / datetime.now().strftime("%Y%m%d_%H%M%S")
-    shard_root = parent / "shards"
+    shard_root = ensure_dir(parent / "shards")
 
     todo = jobs
     if args.shard:

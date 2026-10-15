@@ -141,10 +141,6 @@ def _check_energy_terms(device="cpu"):
     return report
 
 
-# ---------------------------------------------------------------------------
-# Artificial-fade control (no rollout involved)
-# ---------------------------------------------------------------------------
-
 
 def contrast_sweep(frames, r_init, deconvs, cfg, scales):
     """Settle from zero init directly on scale*I for each frame/scale.
