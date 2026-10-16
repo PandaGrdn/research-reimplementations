@@ -141,6 +141,18 @@ def _build_model(kind, cfg, r_init, deconvs, device):
 
 
 def _resolve_model(kind, seed, root, cfg, r_init, deconvs, device, get_train_codes, test_codes, fallback_epochs, fallback_lr, log=print):
+    # c13.<kind>_ckpt, e.g. "results/c1_rollout_collapse/farmshare/seed{seed}/temporal.pt",
+    # evaluates a model trained elsewhere (here: C1's end-to-end PC model)
+    # instead of the offline GRU C11 saves. It must exist: no silent fallback.
+    template = cfg.get("c13", {}).get(f"{kind}_ckpt")
+    if template:
+        ckpt = Path(root) / template.format(seed=seed)
+        if not ckpt.exists():
+            raise SystemExit(f"c13.{kind}_ckpt: no checkpoint at {ckpt}")
+        model = _load_ckpt_defensive(ckpt, r_init, cfg, device, deconvs=deconvs)
+        model.to(device).eval()
+        log(f"[{kind}] loaded checkpoint {ckpt} (from c13.{kind}_ckpt)")
+        return model, True, str(ckpt)
     name = f"offline_gru_seed{seed}.pt" if kind == "independent" else f"offline_gru_coupled_seed{seed}.pt"
     ckpt = Path(root) / "artifacts" / name
     if ckpt.exists():
@@ -416,6 +428,8 @@ def main():
         kinds.append("coupled")
     else:
         print("CoupledTopDownRNN unavailable (src.temporal has not landed it yet) — skipping the coupled model kind.")
+    if c13.get("kinds"):
+        kinds = [k for k in kinds if k in c13["kinds"]]
 
     pooled_steps = {kind: {arm: [] for arm in arms} for kind in kinds}
     per_seed_records = []

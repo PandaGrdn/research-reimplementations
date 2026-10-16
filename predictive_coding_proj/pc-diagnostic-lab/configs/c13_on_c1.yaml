@@ -1,0 +1,7 @@
+# C13 on C1's own end-to-end PC models instead of C11's offline GRUs.
+# Use together with configs/reporting.yaml, on the machine that trained C1
+# (its dictionaries must be the ones C1 was trained with):
+#   python experiments/c13_consistency_rollout.py --overlay configs/reporting.yaml configs/c13_on_c1.yaml
+c13:
+  kinds: [independent]
+  independent_ckpt: results/c1_rollout_collapse/farmshare/seed{seed}/temporal.pt

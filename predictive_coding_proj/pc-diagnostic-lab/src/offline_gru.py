@@ -7,6 +7,7 @@ optimizer and the training targets change (Adam on cached codes).
 
 import copy
 import hashlib
+import os
 import json
 from pathlib import Path
 
@@ -79,7 +80,11 @@ def cache_eval_codes(split_name, seqs, deconvs, r_init, cfg, root, seed, log=pri
     codes = encode_eval_codes(seqs, deconvs, r_init, cfg)
     path.parent.mkdir(parents=True, exist_ok=True)
     cpu_codes = [[[ri.detach().cpu() for ri in frame] for frame in seq] for seq in codes]
-    torch.save(cpu_codes, path)
+    # Write-then-rename: C11, C12 and C13 jobs can run at once and share this
+    # cache, so a reader must never see a half-written file.
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    torch.save(cpu_codes, tmp)
+    os.replace(tmp, path)
     log(f"cache_eval_codes[{split_name}]: computed {len(codes)} sequences, saved to {path}")
     return codes
 
