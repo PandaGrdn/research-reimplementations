@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 # Moving MNIST is 819 MB and re-downloads on first run (src/data.py)
 predictive_coding_proj/data/MovingMNIST/
+
+.env
