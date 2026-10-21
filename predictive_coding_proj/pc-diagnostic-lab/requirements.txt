@@ -1,5 +1,11 @@
-torch
-torchvision
-numpy
-matplotlib
-pyyaml
+# Pinned so a rerun uses the same library code. These are the versions on the
+# FarmShare venv that produced the cluster results (CPU wheels: install with
+# --extra-index-url https://download.pytorch.org/whl/cpu). Runs made on the
+# laptop used torch 2.13.0 / torchvision 0.28.0 / matplotlib 3.11.1.
+torch==2.14.1
+torchvision==0.29.1
+numpy==2.5.2
+matplotlib==3.11.2
+pyyaml==6.0.3
+# only needed to build the KTH clip cache (src/datasets.py)
+opencv-python-headless==5.0.0.93

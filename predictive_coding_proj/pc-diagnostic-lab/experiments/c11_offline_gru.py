@@ -44,6 +44,7 @@ from src.experiment import (
 )
 from src.metrics import stack_mean_std
 from src.offline_gru import (
+    offline_gru_artifact,
     cache_eval_codes,
     encode_eval_codes,
     gru_r2_per_layer,
@@ -222,8 +223,8 @@ def main():
         rec = _run_seed(seed, cfg, root, device, c11, c9, use_cache, run_dir, epochs, lr, probe_epochs)
         per_seed.append(rec)
         if not args.smoke:
-            art_indep = Path(root) / "artifacts" / f"offline_gru_seed{seed}.pt"
-            art_coupled = Path(root) / "artifacts" / f"offline_gru_coupled_seed{seed}.pt"
+            art_indep = offline_gru_artifact(root, cfg, seed)
+            art_coupled = offline_gru_artifact(root, cfg, seed, coupled=True)
             art_indep.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(rec["checkpoints"]["independent"], art_indep)
             shutil.copy2(rec["checkpoints"]["coupled"], art_coupled)

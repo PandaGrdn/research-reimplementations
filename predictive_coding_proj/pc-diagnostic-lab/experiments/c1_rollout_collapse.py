@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """C1 — long-horizon rollout collapses at the GT → self-prediction handoff."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from src.experiment import (
     ensure_dictionary,
     eval_long_rollouts,
     load_data,
+    load_temporal_checkpoint,
     parse_args,
     setup,
     train_temporal_pc,
@@ -69,6 +71,13 @@ def aggregate(per_seed, cfg):
             "mean_frame_long": [],
             "copy_last_curve": [],
             "mean_frame_curve": [],
+            "blank_long": [],
+            "blank_curve": [],
+            "mass_ratio_long": [],
+            "mass_ratio_curve": [],
+            "corr_long": [],
+            "corr_curve": [],
+            "copy_last_corr_long": [],
         }
         for sp in cfg["eval"]["split_points"]
     }
@@ -81,6 +90,15 @@ def aggregate(per_seed, cfg):
             by_split[sp]["mean_frame_long"].append(payload["mean_frame_long_mse_mean"])
             by_split[sp]["copy_last_curve"].append(payload["copy_last_mse_per_frame_mean"])
             by_split[sp]["mean_frame_curve"].append(payload["mean_frame_mse_per_frame_mean"])
+            if "blank_long_mse_mean" in payload:  # absent in runs made before these existed
+                by_split[sp]["blank_long"].append(payload["blank_long_mse_mean"])
+                by_split[sp]["blank_curve"].append(payload["blank_mse_per_frame_mean"])
+                by_split[sp]["mass_ratio_long"].append(payload["mass_ratio_long_mean"])
+                by_split[sp]["mass_ratio_curve"].append(payload["mass_ratio_per_frame_mean"])
+            if "corr_long_mean" in payload:
+                by_split[sp]["corr_long"].append(payload["corr_long_mean"])
+                by_split[sp]["corr_curve"].append(payload["corr_per_frame_mean"])
+                by_split[sp]["copy_last_corr_long"].append(payload["copy_last_corr_long_mean"])
         history = rec["history"]
         if history:
             last_epoch = history[-1]
@@ -109,6 +127,15 @@ def aggregate(per_seed, cfg):
             "copy_last_mse_per_frame_mean": cl_curve_mu,
             "mean_frame_mse_per_frame_mean": mf_curve_mu,
         }
+        if payload["blank_long"]:
+            splits[sp]["blank_long_mse_mean"], splits[sp]["blank_long_mse_std"] = mean_std(payload["blank_long"])
+            splits[sp]["blank_mse_per_frame_mean"] = stack_mean_std(payload["blank_curve"])[0]
+            splits[sp]["mass_ratio_long_mean"], splits[sp]["mass_ratio_long_std"] = mean_std(payload["mass_ratio_long"])
+            splits[sp]["mass_ratio_per_frame_mean"] = stack_mean_std(payload["mass_ratio_curve"])[0]
+        if payload["corr_long"]:
+            splits[sp]["corr_long_mean"], splits[sp]["corr_long_std"] = mean_std(payload["corr_long"])
+            splits[sp]["corr_per_frame_mean"] = stack_mean_std(payload["corr_curve"])[0]
+            splits[sp]["copy_last_corr_long_mean"] = mean_std(payload["copy_last_corr_long"])[0]
 
     headline_sp = str(cfg["eval"].get("headline_split", 10))
     h = splits.get(headline_sp) or next(iter(splits.values()))
@@ -125,6 +152,10 @@ def aggregate(per_seed, cfg):
         f"| copy-last floor {h['copy_last_long_mse_mean']:.4f} | mean-frame floor {h['mean_frame_long_mse_mean']:.4f} "
         f"| tf MSE at last epoch {tf_mse_mean:.4f} (copy-last {tf_copy_last_mean:.4f}) | n_seeds={len(per_seed)}"
     )
+    if "blank_long_mse_mean" in h:
+        summary += f" | blank floor {h['blank_long_mse_mean']:.4f} | brightness kept {h['mass_ratio_long_mean']:.2f}"
+    if "corr_long_mean" in h:
+        summary += f" | pixel corr {h['corr_long_mean']:.3f} (copy-last {h['copy_last_corr_long_mean']:.3f})"
     return {
         "claim": "C1",
         "seeds": per_seed,
@@ -144,6 +175,14 @@ def main():
     root, cfg, device, seeds = setup(args)
     run_dir = new_run_dir(root, "c1_rollout_collapse", arm=arm_name(cfg))
     per_seed = []
+    # --ckpt "results/c1_rollout_collapse/<run>/seed{seed}/temporal.pt" re-scores
+    # saved models with the current evaluation instead of training new ones.
+    # Training history comes from that run's metrics.json, two levels up.
+    prior_history = {}
+    if args.ckpt:
+        prior = Path(args.ckpt.format(seed=seeds[0])).parent.parent / "metrics.json"
+        if prior.exists():
+            prior_history = {r["seed"]: r["history"] for r in json.loads(prior.read_text()).get("seeds", [])}
 
     for seed in seeds:
         seed_everything(seed)
@@ -151,16 +190,23 @@ def main():
         train, val, test, info = load_data(cfg, root, seed)
         print(f"seed={seed}  {info['n_train']} train / {info['n_test']} test  hash={info['split_hash']}")
         deconvs, r_init, _ = ensure_dictionary(cfg, train, device, root)
-        model = build_temporal(cfg, r_init, device)
         seed_dir = run_dir / f"seed{seed}"
         seed_dir.mkdir(parents=True, exist_ok=True)
-        model, history, _ = train_temporal_pc(
-            train, r_init, deconvs, model, cfg, device, val_seq=val[0], log=print, run_dir=seed_dir
-        )
+        if args.ckpt:
+            model = load_temporal_checkpoint(args.ckpt.format(seed=seed), r_init, cfg, device)
+            history = prior_history.get(seed, [])
+            print(f"seed={seed}: re-scoring {args.ckpt.format(seed=seed)} ({len(history)} epochs of history)")
+        else:
+            model = build_temporal(cfg, r_init, device)
+            model, history, _ = train_temporal_pc(
+                train, r_init, deconvs, model, cfg, device, val_seq=val[0], log=print, run_dir=seed_dir
+            )
         long = eval_long_rollouts(test, r_init, deconvs, model, cfg, device, log=print, run_dir=seed_dir)
         per_seed.append({"seed": seed, "history": history, "long": long, "split_hash": info["split_hash"]})
 
     metrics = aggregate(per_seed, cfg)
+    if args.ckpt:
+        metrics["rescored_from"] = args.ckpt
     finish_run(run_dir, cfg, metrics, root=root, summary=metrics["summary"])
 
 

@@ -2,6 +2,8 @@
 
 import argparse
 import copy
+import hashlib
+import json
 import os
 import random
 from pathlib import Path
@@ -70,6 +72,7 @@ def load_data(cfg, root, seed):
         cfg["data"]["n_val"],
         cfg["data"]["n_test"],
         seed,
+        data_cfg=cfg["data"],
     )
     return train, val, test, info
 
@@ -92,6 +95,20 @@ def _rng_restore(snap, seed):
         # seed_everything(seed) right before ensure_dictionary, so reseeding
         # puts it back where a cache hit would have left it.
         torch.mps.manual_seed(seed)
+
+
+# Fingerprint of the exact dictionary weights each seed used in this process.
+# The cache key names a dictionary by its config, but two machines that each
+# pretrain one get different weights under the same key. Runs record these so
+# a merge, or a model trained on one dictionary, can refuse a mismatch.
+DICT_FINGERPRINTS = {}
+
+
+def dictionary_fingerprint(deconvs):
+    h = hashlib.sha256()
+    for d in deconvs:
+        h.update(d.weight.detach().cpu().contiguous().numpy().tobytes())
+    return h.hexdigest()[:16]
 
 
 def ensure_dictionary(cfg, train, device, root, log=print, seed=None):
@@ -144,7 +161,8 @@ def ensure_dictionary(cfg, train, device, root, log=print, seed=None):
         path = keyed
 
     deconvs, r_init, val_mse = load_dictionary(path, device)
-    log(f"loaded dictionary {path} val_mse={val_mse}")
+    DICT_FINGERPRINTS[int(seed)] = dictionary_fingerprint(deconvs)
+    log(f"loaded dictionary {path} val_mse={val_mse} fingerprint={DICT_FINGERPRINTS[int(seed)]}")
     if s.get("freeze", True):
         freeze_dictionary(deconvs)
     else:
@@ -177,6 +195,7 @@ def save_temporal_checkpoint(path, temporal_nn, cfg, seed=0):
             "spatial": cfg.get("spatial"),
             "seed": seed,
             "dictionary_key": dictionary_key(cfg, seed=seed),
+            "dictionary_fingerprint": DICT_FINGERPRINTS.get(int(seed)),
             "model_kind": model_kind,
         },
         path,
@@ -198,6 +217,14 @@ def load_temporal_checkpoint(path, r_init, cfg, device, deconvs=None):
     except TypeError:
         ckpt = torch.load(path, map_location=device)
     model_kind = ckpt.get("model_kind", "independent")
+    saved_fp = ckpt.get("dictionary_fingerprint")
+    current_fp = DICT_FINGERPRINTS.get(int(ckpt.get("seed", -1)))
+    if saved_fp and current_fp and saved_fp != current_fp:
+        raise SystemExit(
+            f"{path} was trained with dictionary {saved_fp}, but this run loaded dictionary {current_fp} "
+            f"for seed {ckpt.get('seed')}. Same cache key, different weights: run on the machine whose "
+            f"artifacts/ trained this model."
+        )
     if model_kind == "coupled":
         if deconvs is None:
             raise ValueError(
@@ -217,6 +244,85 @@ def load_temporal_checkpoint(path, r_init, cfg, device, deconvs=None):
     model.load_state_dict(ckpt["temporal_state"])
     model.eval()
     return model
+
+
+# ---------------------------------------------------------------------------
+# Per-epoch training checkpoints (resume after a time limit or a lost node)
+# ---------------------------------------------------------------------------
+# Active only when PC_LAB_RUN_DIR is set, i.e. under scripts/run_parallel.py or
+# Slurm, where a rerun of the same job lands in the same directory. The k-th
+# train_temporal_pc call in a process uses train_ckpt/call<k>.pt; scripts call
+# it in a fixed order, so a rerun maps each call to its own checkpoint. On CPU
+# and CUDA a resumed run is bit-identical to an uninterrupted one (tested). The
+# MPS generator cannot be saved, so on MPS a resume is close but not exact.
+_TRAIN_CALLS = [0]
+
+
+def _train_ckpt_path():
+    base = os.environ.get("PC_LAB_RUN_DIR")
+    if not base or os.environ.get("PC_LAB_NO_TRAIN_CKPT") == "1":
+        return None
+    _TRAIN_CALLS[0] += 1
+    return Path(base) / "train_ckpt" / f"call{_TRAIN_CALLS[0]}.pt"
+
+
+def _train_fingerprint(cfg, sequences, val_seq):
+    blob = json.dumps(
+        {
+            "sections": {k: cfg.get(k) for k in ("data", "spatial", "inference", "temporal")},
+            "seed": cfg.get("seed"),
+            "n_sequences": len(sequences),
+            "has_val": val_seq is not None,
+        },
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
+def _save_train_ckpt(path, epoch_done, n_epochs, fingerprint, temporal_nn, deconvs, encoder, history, last_val):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    state = {
+        "epoch_done": epoch_done,
+        "n_epochs": n_epochs,
+        "fingerprint": fingerprint,
+        "temporal_state": temporal_nn.state_dict(),
+        "deconv_state": [d.state_dict() for d in deconvs],
+        "encoder_state": encoder.state_dict() if encoder is not None and hasattr(encoder, "state_dict") else None,
+        "history": history,
+        "last_val": last_val,
+        "rng": _rng_snapshot(),
+    }
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    torch.save(state, tmp)
+    os.replace(tmp, path)
+
+
+def _load_train_ckpt(path, fingerprint, temporal_nn, deconvs, encoder, device, log):
+    try:
+        state = torch.load(path, map_location=device, weights_only=False)
+    except TypeError:
+        state = torch.load(path, map_location=device)
+    if state["fingerprint"] != fingerprint:
+        raise SystemExit(
+            f"{path} was written by a run with a different config or data; refusing to resume from it. "
+            f"Delete it or use a fresh run directory."
+        )
+    temporal_nn.load_state_dict(state["temporal_state"])
+    for d, sd in zip(deconvs, state["deconv_state"]):
+        d.load_state_dict(sd)
+    if encoder is not None and state.get("encoder_state") is not None:
+        encoder.load_state_dict(state["encoder_state"])
+    snap = state["rng"]
+    random.setstate(snap["py"])
+    np.random.set_state(snap["np"])
+    torch.set_rng_state(snap["torch"].cpu() if hasattr(snap["torch"], "cpu") else snap["torch"])
+    if "cuda" in snap and torch.cuda.is_available():
+        torch.cuda.set_rng_state_all([s.cpu() for s in snap["cuda"]])
+    if str(device).startswith("mps"):
+        log("note: resuming on MPS; its random generator is not saved, so this run is not bit-identical")
+    log(f"resumed training from {path} at epoch {state['epoch_done']}/{state['n_epochs']}")
+    return state["epoch_done"], state["history"], state["last_val"]
 
 
 def train_temporal_pc(
@@ -239,7 +345,15 @@ def train_temporal_pc(
     history = []
     last_val = None
 
-    for epoch in range(n_epochs):
+    start_epoch = 0
+    ckpt_path = _train_ckpt_path()
+    fingerprint = _train_fingerprint(cfg, sequences, val_seq) if ckpt_path is not None else None
+    if ckpt_path is not None and ckpt_path.exists():
+        start_epoch, history, last_val = _load_train_ckpt(
+            ckpt_path, fingerprint, temporal_nn, deconvs, encoder, device, log
+        )
+
+    for epoch in range(start_epoch, n_epochs):
         ss_p = scheduled_value(tcfg.get("ss_p", 0.0), tcfg.get("ss_p_end"), epoch, n_epochs)
         r_noise = scheduled_value(tcfg.get("r_noise_std", 0.0), tcfg.get("r_noise_std_end"), epoch, n_epochs)
         epoch_ratios = []
@@ -309,6 +423,11 @@ def train_temporal_pc(
         else:
             log(f"[Epoch {epoch:03d}/{n_epochs:03d}]  r_noise={r_noise:.4f}  ss_p={ss_p:.3f}  train_δ-ratio={train_ratio:.4f}")
         history.append(rec)
+        if ckpt_path is not None:
+            _save_train_ckpt(ckpt_path, epoch + 1, n_epochs, fingerprint, temporal_nn, deconvs, encoder, history, last_val)
+            stop_after = os.environ.get("PC_LAB_TEST_STOP_AFTER_EPOCH")  # tests simulate a killed job
+            if stop_after is not None and epoch + 1 == int(stop_after):
+                raise SystemExit(75)
 
     if run_dir is not None and last_val is not None:
         save_rollout_panel(
@@ -338,6 +457,8 @@ def eval_long_rollouts(
         curves, long_mses, saturations = [], [], []
         copy_last_long_vals, mean_frame_long_vals = [], []
         copy_last_curves, mean_frame_curves = [], []
+        blank_long_vals, blank_curves, mass_ratio_long_vals, mass_ratio_curves = [], [], [], []
+        corr_long_vals, corr_curves, cl_corr_long_vals, cl_corr_curves = [], [], [], []
         last = None
         for seq in seqs[:n_eval]:
             last = validate_hierarchical_long(
@@ -363,6 +484,14 @@ def eval_long_rollouts(
             mean_frame_long_vals.append(last["mean_frame_long_mse"])
             copy_last_curves.append(last["copy_last_mse_per_frame"])
             mean_frame_curves.append(last["mean_frame_mse_per_frame"])
+            blank_long_vals.append(last["blank_long_mse"])
+            blank_curves.append(last["blank_mse_per_frame"])
+            mass_ratio_long_vals.append(last["mass_ratio_long"])
+            mass_ratio_curves.append(last["mass_ratio_per_frame"])
+            corr_long_vals.append(last["corr_long"])
+            corr_curves.append(last["corr_per_frame"])
+            cl_corr_long_vals.append(last["copy_last_corr_long"])
+            cl_corr_curves.append(last["copy_last_corr_per_frame"])
             if last["saturation"] is not None:
                 saturations.append(last["saturation"])
         from src.metrics import stack_mean_std
@@ -385,6 +514,17 @@ def eval_long_rollouts(
             "mean_frame_long_mse_std": mf_long_sd,
             "copy_last_mse_per_frame_mean": cl_curve_mu,
             "mean_frame_mse_per_frame_mean": mf_curve_mu,
+            "blank_long_mse_mean": mean_std(blank_long_vals)[0],
+            "blank_long_mse_std": mean_std(blank_long_vals)[1],
+            "blank_mse_per_frame_mean": stack_mean_std(blank_curves)[0],
+            "mass_ratio_long_mean": mean_std(mass_ratio_long_vals)[0],
+            "mass_ratio_long_std": mean_std(mass_ratio_long_vals)[1],
+            "mass_ratio_per_frame_mean": stack_mean_std(mass_ratio_curves)[0],
+            "corr_long_mean": mean_std(corr_long_vals)[0],
+            "corr_long_std": mean_std(corr_long_vals)[1],
+            "corr_per_frame_mean": stack_mean_std(corr_curves)[0],
+            "copy_last_corr_long_mean": mean_std(cl_corr_long_vals)[0],
+            "copy_last_corr_per_frame_mean": stack_mean_std(cl_corr_curves)[0],
             "n": n_eval,
             "saturation": saturations[0] if saturations else None,
         }

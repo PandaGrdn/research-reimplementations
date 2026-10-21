@@ -1,0 +1,10 @@
+# Bouncing balls (synthetic, generated on first use; see src/datasets.py).
+#   python experiments/c1_rollout_collapse.py --overlay configs/reporting.yaml configs/data/bouncing_balls.yaml
+data:
+  name: bouncing_balls
+  bouncing_balls:
+    n_sequences: 2000
+    n_balls: 3
+    radius: 6.0
+    speed_min: 2.0
+    speed_max: 4.0

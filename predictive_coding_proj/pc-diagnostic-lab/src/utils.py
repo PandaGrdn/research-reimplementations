@@ -119,6 +119,7 @@ def finish_run(run_dir, cfg, metrics, root=None, summary=None):
         "pip": pip_freeze(),
         "device": str(cfg.get("device")),
         "seed": cfg.get("seed"),
+        "dictionary_fingerprints": _dictionary_fingerprints(),
     }
     (run_dir / "env.json").write_text(json.dumps(env, indent=2, default=str))
     (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2, default=_json_default))
@@ -131,6 +132,14 @@ def finish_run(run_dir, cfg, metrics, root=None, summary=None):
     print(line)
     print(f"wrote {run_dir}")
     return run_dir
+
+
+def _dictionary_fingerprints():
+    try:
+        from src.experiment import DICT_FINGERPRINTS
+    except Exception:  # noqa: BLE001 - utils must not depend on experiment importing cleanly
+        return {}
+    return {str(k): v for k, v in sorted(DICT_FINGERPRINTS.items())}
 
 
 def _json_default(obj):

@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from src.datasets import dataset_spec
 from src.utils import clone_r, to_device_r
 
 
@@ -203,6 +204,9 @@ def dictionary_key(cfg, seed=0):
             "n_train": cfg.get("data", {}).get("n_train"),
             "pretrain_seed": seed,
     }
+    spec = dataset_spec(cfg.get("data"))
+    if spec is not None:  # Moving MNIST keeps its pre-existing keys
+        payload["dataset"] = spec
     blob = json.dumps(payload, sort_keys=True, default=str).encode()
     return hashlib.sha256(blob).hexdigest()[:12]
 

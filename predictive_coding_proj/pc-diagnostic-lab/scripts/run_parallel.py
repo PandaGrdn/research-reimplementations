@@ -130,7 +130,7 @@ def resolve_overlays(overlays):
 
 
 def c2_jobs(cfg, seeds, cells):
-    names = cells or cfg.get("c2", {}).get("cells") or C2_CELLS
+    names = cells or cfg.get("c2", {}).get("cells") or c2_exp.DEFAULT_CELLS
     unknown = [n for n in names if n not in C2_CELLS]
     if unknown:
         raise SystemExit(f"unknown C2 cells {unknown}; known: {C2_CELLS}")
@@ -250,7 +250,7 @@ def run_job(claim, job, device, smoke, overlays, n_train, epochs, shard_root, th
         env.setdefault("OMP_NUM_THREADS", str(threads))
         env.setdefault("MKL_NUM_THREADS", str(threads))
     print(">>>", " ".join(cmd), flush=True)
-    with open(run_dir / "log.txt", "w") as log:
+    with open(run_dir / "log.txt", "a") as log:
         subprocess.check_call(cmd, cwd=str(ROOT), env=env, stdout=log, stderr=subprocess.STDOUT)
     return run_dir
 
@@ -274,14 +274,19 @@ def merge_c2(shard_dirs):
         "long_mse_mean", "long_mse_std", "per_seed", "seeds",
         "copy_last_long_mse_mean", "copy_last_long_mse_std",
         "mean_frame_long_mse_mean", "mean_frame_long_mse_std",
+        "blank_long_mse_mean", "mass_ratio_long_mean", "per_seed_mass_ratio", "per_seed_corr", "corr_long_mean",
     }
     cells = []
     for name, recs in by_name.items():
         base = {k: v for k, v in recs[0].items() if k not in drop}
-        per_seed, seeds, cl, mf = [], [], [], []
+        per_seed, seeds, cl, mf, blank, mass, corr = [], [], [], [], [], [], []
         for r in recs:
             per_seed.extend(r.get("per_seed") or [])
             seeds.extend(r.get("seeds") or [])
+            if r.get("blank_long_mse_mean") is not None:
+                blank.append(r["blank_long_mse_mean"])
+            mass.extend(r.get("per_seed_mass_ratio") or [])
+            corr.extend(r.get("per_seed_corr") or [])
             if r.get("copy_last_long_mse_mean") is not None:
                 cl.append(r["copy_last_long_mse_mean"])
             if r.get("mean_frame_long_mse_mean") is not None:
@@ -301,6 +306,9 @@ def merge_c2(shard_dirs):
             "mean_frame_long_mse_std": mf_sd,
             "per_seed": per_seed,
             "seeds": seeds,
+            **({"blank_long_mse_mean": mean_std(blank)[0]} if blank else {}),
+            **({"mass_ratio_long_mean": mean_std(mass)[0], "per_seed_mass_ratio": mass} if mass else {}),
+            **({"corr_long_mean": mean_std(corr)[0], "per_seed_corr": corr} if corr else {}),
         })
     order = {n: i for i, n in enumerate(C2_CELLS)}
     cells.sort(key=lambda c: order.get(c["name"], 99))
@@ -386,6 +394,22 @@ def merge_c7(shard_dirs):
     return metrics
 
 
+def check_dictionary_fingerprints(shard_dirs):
+    """Every shard that used seed k must have used the same dictionary weights.
+    Shards from different machines can share a cache key but not weights."""
+    seen = {}
+    for d in shard_dirs:
+        env_path = Path(d) / "env.json"
+        if not env_path.exists():
+            continue
+        for seed, fp in (json.loads(env_path.read_text()).get("dictionary_fingerprints") or {}).items():
+            seen.setdefault(seed, {}).setdefault(fp, []).append(Path(d).name)
+    clash = {s: v for s, v in seen.items() if len(v) > 1}
+    if clash:
+        raise SystemExit(f"shards used different dictionaries for the same seed: {clash}")
+    return {s: next(iter(v)) for s, v in seen.items()}
+
+
 def merge_seeds(claim, shard_dirs, cfg):
     """Merge one-seed shards of C1 / C3 / C8: concatenate their per-seed records
     in the order of `shard_dirs` and re-run the experiment's own aggregate()."""
@@ -443,11 +467,13 @@ def write_merged(claim, parent, jobs, cfg, allow_partial=False, link=True, extra
             f"finish them with --resume {parent}, or pass --allow-partial to merge anyway. "
             f"If this run used a subset or --smoke, pass the same --cells/--seeds/--smoke flags to the merge."
         )
+    fingerprints = check_dictionary_fingerprints(done)
     if claim in SEED_CLAIMS:
         metrics = merge_seeds(claim, done, cfg)
         link_seed_dirs(parent, done)
     else:
         metrics = merge_c2(done) if claim == "c2" else merge_c7(done)
+    metrics["dictionary_fingerprints"] = fingerprints
     metrics["n_jobs_expected"] = len(jobs)
     metrics["n_jobs_merged"] = len(done)
     metrics["missing_shards"] = missing

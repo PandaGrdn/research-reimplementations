@@ -43,7 +43,7 @@ from src.experiment import (
     setup,
 )
 from src.metrics import flat_r, pair_stats, stack_mean_std
-from src.offline_gru import encode_eval_codes, train_offline_gru
+from src.offline_gru import encode_eval_codes, train_offline_gru, offline_gru_artifact
 from src.spatial_pc import f_clamp
 from src.utils import clone_r, finish_run, new_run_dir, seed_everything
 
@@ -153,8 +153,7 @@ def _resolve_model(kind, seed, root, cfg, r_init, deconvs, device, get_train_cod
         model.to(device).eval()
         log(f"[{kind}] loaded checkpoint {ckpt} (from c13.{kind}_ckpt)")
         return model, True, str(ckpt)
-    name = f"offline_gru_seed{seed}.pt" if kind == "independent" else f"offline_gru_coupled_seed{seed}.pt"
-    ckpt = Path(root) / "artifacts" / name
+    ckpt = offline_gru_artifact(root, cfg, seed, coupled=(kind != "independent"))
     if ckpt.exists():
         model = _load_ckpt_defensive(ckpt, r_init, cfg, device, deconvs=deconvs)
         model.to(device).eval()

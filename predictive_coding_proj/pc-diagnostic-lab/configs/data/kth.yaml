@@ -1,0 +1,8 @@
+# KTH human actions (downloads about 1.2 GB on first use; see src/datasets.py).
+# Split by person: 1-16 train/val, 17-25 test.
+#   python experiments/c1_rollout_collapse.py --overlay configs/reporting.yaml configs/data/kth.yaml
+data:
+  name: kth
+  kth:
+    frame_stride: 1
+    clips_per_video: 4

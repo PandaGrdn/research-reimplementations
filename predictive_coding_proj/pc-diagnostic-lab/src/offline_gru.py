@@ -543,3 +543,13 @@ def aggregate_energy_fade(per_seq, split_point):
         "fade_gap_post": float(fade),
         "energy_tracks_fade": bool(fade > 0 and faded > 0),
     }
+
+
+def offline_gru_artifact(root, cfg, seed, coupled=False):
+    """artifacts/offline_gru[_coupled]_seed{k}.pt for Moving MNIST (the names
+    existing runs already use), with a _<dataset> suffix for any other dataset
+    so C11/C12/C13 runs on different datasets never overwrite each other."""
+    name = (cfg.get("data") or {}).get("name", "moving_mnist")
+    suffix = "" if name == "moving_mnist" else f"_{name}"
+    kind = "_coupled" if coupled else ""
+    return Path(root) / "artifacts" / f"offline_gru{kind}{suffix}_seed{seed}.pt"

@@ -34,7 +34,15 @@ CELLS = [
     # dict instead of the flat temporal-key fields the cells above use.
     {"name": "temporal_prior_off", "inference_overlay": {"temporal_prior_weight": 0.0}},
     {"name": "temporal_prior_strong", "inference_overlay": {"temporal_prior_weight": 1.0}},
+    # Follow-ups, not in the default grid: in the cells above the slowness pull
+    # (temporal.lambda_slow=3) points the same way as the temporal prior and is
+    # 3-300x stronger, so the prior's weight barely moves the settled code.
+    # These remove the slowness pull, with the prior at its default and at 1.0.
+    {"name": "slowness_off", "temporal_overlay": {"lambda_slow": 0.0}},
+    {"name": "prior_strong_slowness_off", "temporal_overlay": {"lambda_slow": 0.0},
+     "inference_overlay": {"temporal_prior_weight": 1.0}},
 ]
+DEFAULT_CELLS = [c["name"] for c in CELLS[:9]]
 
 
 def overlay_inference(cfg, **kwargs):
@@ -44,16 +52,19 @@ def overlay_inference(cfg, **kwargs):
 
 
 def selected_cells(cfg):
-    names = cfg.get("c2", {}).get("cells")
-    if not names:
-        return CELLS
+    names = cfg.get("c2", {}).get("cells") or DEFAULT_CELLS
     wanted = set(names)
     return [c for c in CELLS if c["name"] in wanted]
 
 
 def build_cell_cfg(cfg, cell):
-    if "inference_overlay" in cell:
-        return overlay_inference(cfg, **cell["inference_overlay"])
+    if "inference_overlay" in cell or "temporal_overlay" in cell:
+        out = cfg
+        if "temporal_overlay" in cell:
+            out = overlay_temporal(out, **cell["temporal_overlay"])
+        if "inference_overlay" in cell:
+            out = overlay_inference(out, **cell["inference_overlay"])
+        return out
     return overlay_temporal(cfg, **{k: v for k, v in cell.items() if k != "name"})
 
 
@@ -69,6 +80,8 @@ def summarize(results, headline_sp):
             f"  | copy-last floor {floor_ref['copy_last_long_mse_mean']:.4f} "
             f"| mean-frame floor {floor_ref['mean_frame_long_mse_mean']:.4f}"
         )
+        if floor_ref.get("blank_long_mse_mean") is not None:
+            summary += f" | blank floor {floor_ref['blank_long_mse_mean']:.4f}"
     return {"claim": "C2", "headline_split": headline_sp, "cells": results, "summary": summary}
 
 
@@ -81,7 +94,7 @@ def main():
     results = []
 
     for cell in cells:
-        long_vals, cl_floor_vals, mf_floor_vals = [], [], []
+        long_vals, cl_floor_vals, mf_floor_vals, blank_vals, mass_vals, corr_vals = [], [], [], [], [], []
         for seed in seeds:
             seed_everything(seed)
             cell_cfg = build_cell_cfg(cfg, cell)
@@ -100,6 +113,9 @@ def main():
             long_vals.append(payload["long_mse_mean"])
             cl_floor_vals.append(payload["copy_last_long_mse_mean"])
             mf_floor_vals.append(payload["mean_frame_long_mse_mean"])
+            blank_vals.append(payload["blank_long_mse_mean"])
+            mass_vals.append(payload["mass_ratio_long_mean"])
+            corr_vals.append(payload["corr_long_mean"])
         mu, sd = mean_std(long_vals)
         cl_mu, cl_sd = mean_std(cl_floor_vals)
         mf_mu, mf_sd = mean_std(mf_floor_vals)
@@ -114,6 +130,11 @@ def main():
             "mean_frame_long_mse_std": mf_sd,
             "per_seed": long_vals,
             "seeds": list(seeds),
+            "blank_long_mse_mean": mean_std(blank_vals)[0],
+            "mass_ratio_long_mean": mean_std(mass_vals)[0],
+            "per_seed_mass_ratio": mass_vals,
+            "per_seed_corr": corr_vals,
+            "corr_long_mean": mean_std(corr_vals)[0],
         }
         results.append(rec)
         print(f"C2 | {cell['name']}: {mu:.4f} ± {sd:.4f}  (copy-last floor {cl_mu:.4f})")

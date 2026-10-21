@@ -315,6 +315,9 @@ def run_arm(arm, cfg, train, val, test, r_init, deconvs, device, encoder, refine
         "long_mse": lh["long_mse_mean"],
         "copy_last_long_mse": lh["copy_last_long_mse_mean"],
         "mean_frame_long_mse": lh["mean_frame_long_mse_mean"],
+        "blank_long_mse": lh.get("blank_long_mse_mean"),
+        "mass_ratio_long": lh.get("mass_ratio_long_mean"),
+        "corr_long": lh.get("corr_long_mean"),
         "predictability": predictability,
     }
 
@@ -381,6 +384,15 @@ def aggregate(per_seed, cfg):
             "long_mse_std": mean_std(s["long_mse"])[1],
             "copy_last_long_mse_mean": mean_std(s["copy_last_long_mse"])[0],
             "mean_frame_long_mse_mean": mean_std(s["mean_frame_long_mse"])[0],
+            "blank_long_mse_mean": mean_std(
+                [r["arms"][arm]["blank_long_mse"] for r in per_seed if r["arms"][arm].get("blank_long_mse") is not None]
+            )[0],
+            "mass_ratio_long_mean": mean_std(
+                [r["arms"][arm]["mass_ratio_long"] for r in per_seed if r["arms"][arm].get("mass_ratio_long") is not None]
+            )[0],
+            "corr_long_mean": mean_std(
+                [r["arms"][arm]["corr_long"] for r in per_seed if r["arms"][arm].get("corr_long") is not None]
+            )[0],
             "motion_gap_mean": mean_std(s["motion_gap"])[0],
             "delta_ratio_mean": mean_std(s["delta_ratio"])[0],
             "predictability": {

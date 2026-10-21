@@ -47,7 +47,7 @@ from src.experiment import (
     setup,
 )
 from src.inference import collect_eval_frames
-from src.offline_gru import encode_eval_codes, train_offline_gru
+from src.offline_gru import encode_eval_codes, train_offline_gru, offline_gru_artifact
 from src.utils import finish_run, new_run_dir, seed_everything
 
 # Agent A is concurrently adding cache_eval_codes to src/offline_gru.py; use it
@@ -154,7 +154,7 @@ def main():
         )
 
         # -- 2. independent model (Agent A's C11 checkpoint, or a fallback trained here) --
-        ckpt = Path(root) / "artifacts" / f"offline_gru_seed{seed}.pt"
+        ckpt = offline_gru_artifact(root, cfg, seed)
         trained = False
         if ckpt.exists():
             print(f"  seed={seed} loading independent checkpoint {ckpt}")
@@ -201,7 +201,7 @@ def main():
         )
 
         # -- 3. coupled model (Agent A's CoupledTopDownRNN), if a checkpoint exists --
-        coupled_ckpt = Path(root) / "artifacts" / f"offline_gru_coupled_seed{seed}.pt"
+        coupled_ckpt = offline_gru_artifact(root, cfg, seed, coupled=True)
         if coupled_ckpt.exists():
             coupled_model = None
             try:

@@ -256,6 +256,30 @@ def validate_hierarchical_long(
     mean_frame_mse = float(sum(mean_frame_mse_per_frame) / max(len(mean_frame_mse_per_frame), 1))
     copy_last_long_mse = long_horizon_mean(copy_last_mse_per_frame, split_point)
     mean_frame_long_mse = long_horizon_mean(mean_frame_mse_per_frame, split_point)
+    # Blank floor: predict a uniform frame at the true frame's mean (0 after the
+    # mean-centering every frame gets). A model whose rollout fades to nothing
+    # converges to this, so beating copy-last or mean-frame alone proves little.
+    blank_mse_per_frame = [float(torch.mean(all_curr[t] ** 2).item()) for t in range(1, T)]
+    blank_long_mse = long_horizon_mean(blank_mse_per_frame, split_point)
+    # Brightness retention: mean |pixel| of the prediction over that of the
+    # truth (1 = keeps full contrast, 0 = faded to a blank frame).
+    pred_mass_per_frame = [float(pred_frames[k].abs().mean().item()) for k in range(pred_frames.shape[0])]
+    true_mass_per_frame = [float(true_frames[k].abs().mean().item()) for k in range(true_frames.shape[0])]
+    mass_ratio_per_frame = [p / (t + 1e-8) for p, t in zip(pred_mass_per_frame, true_mass_per_frame)]
+    mass_ratio_long = long_horizon_mean(mass_ratio_per_frame, split_point)
+    # Pixel correlation with the truth: unlike MSE, a faded copy of the right
+    # frame scores as well as a full-contrast one, and a blank frame scores 0.
+    def _corr(a, b):
+        a = (a - a.mean()).flatten()
+        b = (b - b.mean()).flatten()
+        return float((a @ b / (a.norm() * b.norm() + 1e-8)).item())
+
+    corr_per_frame = [_corr(pred_frames[k], true_frames[k]) for k in range(pred_frames.shape[0])]
+    copy_last_corr_per_frame = [
+        _corr(all_curr[min(t - 1, split_point - 1)], all_curr[t]) for t in range(1, T)
+    ]
+    corr_long = long_horizon_mean(corr_per_frame, split_point)
+    copy_last_corr_long = long_horizon_mean(copy_last_corr_per_frame, split_point)
 
     return {
         "mse": float(mse.detach()),
@@ -269,6 +293,14 @@ def validate_hierarchical_long(
         "mean_frame_mse": mean_frame_mse,
         "copy_last_long_mse": copy_last_long_mse,
         "mean_frame_long_mse": mean_frame_long_mse,
+        "blank_mse_per_frame": blank_mse_per_frame,
+        "blank_long_mse": blank_long_mse,
+        "mass_ratio_per_frame": mass_ratio_per_frame,
+        "mass_ratio_long": mass_ratio_long,
+        "corr_per_frame": corr_per_frame,
+        "corr_long": corr_long,
+        "copy_last_corr_per_frame": copy_last_corr_per_frame,
+        "copy_last_corr_long": copy_last_corr_long,
         "split_point": split_point,
         "split_fix": split_fix,
         "saturation": saturation,

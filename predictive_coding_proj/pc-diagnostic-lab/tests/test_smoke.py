@@ -64,6 +64,48 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(d_bad["noise_share"], 1.0)
         self.assertEqual(d_bad["predictable_fraction"], 0.0)
 
+    def test_bouncing_balls_split_and_physics(self):
+        import tempfile
+        import numpy as np
+        from src.datasets import generate_bouncing_balls
+
+        clips = generate_bouncing_balls({"n_sequences": 40})
+        self.assertEqual(clips.shape, (40, 20, 1, 64, 64))
+        mass = clips.reshape(40, 20, -1).astype(float).sum(-1)
+        # balls never leave the frame: total brightness only dips while two overlap
+        self.assertLess(float((mass.max(1) - mass.min(1)).max() / mass.mean()), 0.2)
+        with tempfile.TemporaryDirectory() as td:
+            cfg = {"name": "bouncing_balls", "bouncing_balls": {"n_sequences": 40}}
+            tr, va, te, info = load_splits(td, 20, 2, 5, seed=0, data_cfg=cfg)
+            tr2, _, _, info2 = load_splits(td, 20, 2, 5, seed=0, data_cfg=cfg)
+            self.assertEqual(info["split_hash"], info2["split_hash"])
+            self.assertEqual(info["dataset"], "bouncing_balls")
+            self.assertEqual(tuple(tr[0].shape), (20, 1, 64, 64))
+            self.assertTrue(np.allclose(float(tr[0][0].mean()), 0.0, atol=1e-5))  # frames are mean-centered
+
+    def test_kth_split_keeps_test_people_out_of_training(self):
+        import numpy as np
+        from src.data import split_indices
+
+        persons = np.repeat(np.arange(1, 26), 12)
+        tr, va, te = split_indices(len(persons), persons, 150, 10, 60, seed=3)
+        self.assertLessEqual(max(persons[tr].max(), persons[va].max()), 16)
+        self.assertGreaterEqual(persons[te].min(), 17)
+        self.assertEqual(len(set(tr) | set(va) | set(te)), 220)  # no clip used twice
+        self.assertEqual((tr, va, te), split_indices(len(persons), persons, 150, 10, 60, seed=3))
+        self.assertNotEqual(tr, split_indices(len(persons), persons, 150, 10, 60, seed=4)[0])
+
+    def test_dataset_changes_dictionary_key_but_not_for_moving_mnist(self):
+        from src.config import resolve_config
+        from src.spatial_pc import dictionary_key
+
+        base = resolve_config()
+        self.assertEqual(dictionary_key(base, seed=0), "f6551b89411b")  # existing caches stay valid
+        bb = resolve_config(overlays=[ROOT / "configs/data/bouncing_balls.yaml"])
+        kth = resolve_config(overlays=[ROOT / "configs/data/kth.yaml"])
+        keys = {dictionary_key(c, seed=0) for c in (base, bb, kth)}
+        self.assertEqual(len(keys), 3)
+
     def test_load_splits_seeded(self):
         data_root = (ROOT / ".." / "data").resolve()
         train0, val0, test0, info0 = load_splits(data_root, 2, 1, 1, seed=0)

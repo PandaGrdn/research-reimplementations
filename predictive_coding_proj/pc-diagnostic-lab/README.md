@@ -86,6 +86,20 @@ Bar chart of long-horizon MSE with copy-last / mean-frame floor lines. The
 point of the figure is that every bar sits on the baseline, at or above the
 floor.
 
+**Why the temporal-prior cells match C1.** Training settles each frame with
+two pulls: the temporal prior toward the GRU's prediction, and the slowness
+term (`temporal.lambda_slow = 3`) toward the previous frame's code. The GRU's
+prediction is close to that previous code, so both pull the same way, and the
+slowness pull is 3 to 300 times stronger. Measured on 40 frames, raising the
+prior weight from 0 to 1.0 changes the settled code by 2.8% with the slowness
+pull on, and by 29% with it off. After the handoff the rollout never settles,
+so the prior cannot act there at all. Two cells outside the default grid test
+the prior with the slowness pull removed:
+
+```bash
+python scripts/run_parallel.py c2 --cells slowness_off prior_strong_slowness_off --seeds 0 1 2 --overlay configs/reporting.yaml
+```
+
 ### C3 — the net learns copy-last / near-identity
 
 `motion_gap = MSE(pred, true_t) − MSE(pred, true_{t−1})` and
@@ -374,6 +388,15 @@ question.
 
 ---
 
+**C13 on C1's own models.** `configs/c13_on_c1.yaml` points C13 at the
+end-to-end models C1 trains instead of C11's offline GRUs (run it on the
+machine that trained C1). On Moving MNIST at full scale the no-settle arm
+reproduces C1's rollout error exactly (0.0375), and consistency settling does
+not help: top-down 0.0390, beating no settling on 0 of 300 sequences. The
+end-to-end model's rollouts carry about a quarter of the offline GRU's
+inter-layer error to begin with, so the gain C13 shows is specific to models
+trained offline on cached codes.
+
 ## The ablation ladder
 
 `scripts/run_ladder.py` + `configs/ablation/*.yaml` run a subset of
@@ -569,34 +592,64 @@ python experiments/c3_copy_detection.py --from-c1 results/c1_rollout_collapse/la
 
 ### Slurm (Stanford FarmShare)
 
-`scripts/farmshare_submit.sh` submits, per experiment, one warmup job, one array
-with one single-core task per job, and one merge job. Every task of an
-experiment writes into `results/<exp>/farmshare`, so resubmitting the same
-command only reruns what is missing.
+`scripts/farmshare_submit.sh` submits every experiment as Slurm jobs. C1, C2,
+C7 and C8 fan out through `run_parallel.py` (warmup job, then one single-core
+array task per seed or grid cell, then a merge job). C3 is read out of C1.
+C5, C6, C9, C11, C12 and C13 are one job each, with C12 and C13 waiting for
+C11, and `c13on1` (C13's settling on this run's C1 models) waiting for C1.
+All tasks of an experiment write into `results/<exp>/$TAG`, so resubmitting the
+same command only reruns what is missing.
 
 ```bash
 ssh SUNETID@login.farmshare.stanford.edu
 git clone https://github.com/PandaGrdn/research-reimplementations.git
 cd research-reimplementations/predictive_coding_proj/pc-diagnostic-lab
-bash scripts/farmshare_submit.sh setup             # venv, CPU torch, dataset, tests
-bash scripts/farmshare_submit.sh pilot             # one 1/10-scale job, to time a core
-bash scripts/farmshare_submit.sh run c1 c3 c2 c8   # 33 single-core tasks; c3 is read out of c1
-bash scripts/farmshare_submit.sh run c7            # 36 more
+bash scripts/farmshare_submit.sh setup                 # venv, pinned packages, Moving MNIST, tests
+bash scripts/farmshare_submit.sh pilot                 # one 1/10-scale job, to time a core
+bash scripts/farmshare_submit.sh run c1 c3 c2 c8       # Moving MNIST spine
+DATA=bouncing_balls TAG=farmshare_bb C2_CELLS="baseline rollout_loss all_combined" \
+  bash scripts/farmshare_submit.sh run c1 c3 c2 c8 c5 c6 c9 c11 c12 c13 c13on1
 squeue -u $USER
 ```
 
 Then, from the laptop:
 
 ```bash
-rsync -av --exclude 'shards/*/seed*' SUNETID@login.farmshare.stanford.edu:research-reimplementations/predictive_coding_proj/pc-diagnostic-lab/results/ results/
-python scripts/make_figures.py
+rsync -av --exclude '*.pt' SUNETID@login.farmshare.stanford.edu:research-reimplementations/predictive_coding_proj/pc-diagnostic-lab/results/c1_rollout_collapse/farmshare/ results/c1_rollout_collapse/farmshare/
 ```
 
-There is no mid-job checkpoint, so the time limit must exceed one job. A full
-job is about 10x the pilot's elapsed time. `DRY_RUN=1` prints the `sbatch`
-commands without submitting. The script was exercised end to end against a
-stand-in `sbatch`, not on FarmShare itself; partition, time and module names are
-environment variables at the top of the script.
+**Long jobs resume.** Every job asks Slurm for a signal 30 minutes before its
+time limit and requeues itself. Training saves a checkpoint after every epoch
+(`<run dir>/train_ckpt/`, active whenever `PC_LAB_RUN_DIR` is set), so the
+requeued job carries on from its last finished epoch. On CPU a resumed run is
+bit-identical to an uninterrupted one (`tests/test_parallel.py`). A full
+Moving MNIST training job takes 24 to 46 hours on FarmShare cores, against a
+48-hour limit on the normal queue.
+
+**Dictionaries are fingerprinted.** The dictionary cache is keyed by config, but
+two machines that each pretrain one get different weights under the same key.
+Every run records the fingerprint of the exact weights it used. A merge refuses
+shards that disagree, and a saved temporal model refuses to load next to a
+different dictionary. Run experiments that depend on each other (C11, C12, C13,
+`c13on1`) on the machine that trained what they load.
+
+`DRY_RUN=1` prints the `sbatch` commands without submitting. Partition, time,
+queue and module names are environment variables at the top of the script.
+
+### Datasets
+
+`data.name` selects the dataset; `configs/data/<name>.yaml` sets it. Every
+experiment runs unchanged on each. Moving MNIST keeps its existing cache keys
+and splits.
+
+| `data.name` | What | Split |
+|---|---|---|
+| `moving_mnist` (default) | 2 digits, 10,000 sequences | random |
+| `bouncing_balls` | 3 balls, elastic wall and ball collisions, generated in `src/datasets.py` | random |
+| `kth` | KTH human actions, 64x64 grayscale, 4 clips per video | by person: 1-16 train, 17-25 test |
+
+Generated and decoded clips are cached under `../data/` on first use. Build them
+once and copy the files to the cluster, so both machines see identical data.
 
 By hand, the three steps are:
 

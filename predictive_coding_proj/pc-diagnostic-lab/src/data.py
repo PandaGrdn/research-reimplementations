@@ -23,7 +23,10 @@ def _ensure_moving_mnist(root):
     return datasets.MovingMNIST(root=str(root), split=None, download=True)
 
 
-def load_splits(root, n_train, n_val, n_test, seed=0):
+def load_splits(root, n_train, n_val, n_test, seed=0, data_cfg=None):
+    name = (data_cfg or {}).get("name", "moving_mnist")
+    if name != "moving_mnist":
+        return _load_other_splits(name, root, n_train, n_val, n_test, seed, data_cfg)
     raw = _ensure_moving_mnist(root)
     n_total = n_train + n_val + n_test
     if n_total > len(raw):
@@ -37,6 +40,57 @@ def load_splits(root, n_train, n_val, n_test, seed=0):
     val = [prep_seq(raw[i]) for i in val_idx]
     test = [prep_seq(raw[i]) for i in test_idx]
     info = {
+        "n_train": n_train,
+        "n_val": n_val,
+        "n_test": n_test,
+        "T": int(train[0].shape[0]),
+        "shape": tuple(int(x) for x in train[0].shape),
+        "split_hash": split_hash(train, val, test),
+        "indices_hash": indices_hash(train_idx + val_idx + test_idx),
+        "seed": seed,
+    }
+    return train, val, test, info
+
+
+def split_indices(n_items, groups, n_train, n_val, n_test, seed, max_train_group=16, name="dataset"):
+    """Seeded train/val/test indices. With `groups` (KTH: person id), train and
+    val come only from groups <= max_train_group and test only from the rest."""
+    g = torch.Generator().manual_seed(seed)
+    if groups is None:  # i.i.d. sequences: one random split, as for Moving MNIST
+        n_total = n_train + n_val + n_test
+        if n_total > n_items:
+            raise ValueError(f"{name}: need {n_total} sequences, dataset has {n_items}")
+        perm = torch.randperm(n_items, generator=g)[:n_total].tolist()
+        return perm[:n_train], perm[n_train:n_train + n_val], perm[n_train + n_val:n_total]
+    groups = [int(x) for x in groups]
+    pool_tr = [i for i, p in enumerate(groups) if p <= max_train_group]
+    pool_te = [i for i, p in enumerate(groups) if p > max_train_group]
+    if n_train + n_val > len(pool_tr) or n_test > len(pool_te):
+        raise ValueError(
+            f"{name}: need {n_train + n_val} train/val and {n_test} test clips, have {len(pool_tr)} and {len(pool_te)}"
+        )
+    ptr = torch.randperm(len(pool_tr), generator=g).tolist()
+    pte = torch.randperm(len(pool_te), generator=g).tolist()
+    return (
+        [pool_tr[i] for i in ptr[:n_train]],
+        [pool_tr[i] for i in ptr[n_train:n_train + n_val]],
+        [pool_te[i] for i in pte[:n_test]],
+    )
+
+
+def _load_other_splits(name, root, n_train, n_val, n_test, seed, data_cfg):
+    from src.datasets import LOADERS
+
+    params = (data_cfg or {}).get(name) or {}
+    clips, groups = LOADERS[name](root, params)
+    train_idx, val_idx, test_idx = split_indices(
+        len(clips), groups, n_train, n_val, n_test, seed, params.get("train_max_person", 16), name
+    )
+    train = [prep_seq(clips[i]) for i in train_idx]
+    val = [prep_seq(clips[i]) for i in val_idx]
+    test = [prep_seq(clips[i]) for i in test_idx]
+    info = {
+        "dataset": name,
         "n_train": n_train,
         "n_val": n_val,
         "n_test": n_test,

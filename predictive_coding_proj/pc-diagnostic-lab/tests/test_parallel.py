@@ -187,6 +187,37 @@ class MergeGuardTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 rp.merge_c2([a, b])
 
+    def test_merge_refuses_mixed_dictionaries(self):
+        jobs = rp.c2_jobs({}, [0], ["baseline", "split_fix"])
+        with tempfile.TemporaryDirectory() as td:
+            parent = Path(td)
+            for job, fp in zip(jobs, ["aaaa", "bbbb"]):
+                d = _fake_c2_shard(parent / "shards", job["cell"], job["seed"], 0.4)
+                (d / "env.json").write_text(json.dumps({"dictionary_fingerprints": {"0": fp}}))
+            with self.assertRaises(SystemExit) as cm:
+                rp.write_merged("c2", parent, jobs, {}, link=False)
+            self.assertIn("different dictionaries", str(cm.exception))
+
+    def test_model_refuses_other_dictionary(self):
+        import torch
+        from src import experiment as ex
+        from src.config import resolve_config
+        from src.spatial_pc import make_from_cfg
+
+        cfg = resolve_config(smoke=True, root=ROOT)
+        _, r_init, _ = make_from_cfg(cfg, "cpu")
+        model = ex.build_temporal(cfg, r_init, "cpu")
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "temporal.pt"
+            ex.DICT_FINGERPRINTS[7] = "trained-on-this"
+            ex.save_temporal_checkpoint(path, model, cfg, seed=7)
+            ex.load_temporal_checkpoint(path, r_init, cfg, "cpu")  # same dictionary: fine
+            ex.DICT_FINGERPRINTS[7] = "a-different-one"
+            with self.assertRaises(SystemExit):
+                ex.load_temporal_checkpoint(path, r_init, cfg, "cpu")
+            ex.DICT_FINGERPRINTS.pop(7)
+        self.assertTrue(torch.is_tensor(r_init[0]))
+
     def test_shard_needs_resume_and_partitions_jobs(self):
         with self.assertRaises(SystemExit):
             rp.main(["c2", "--smoke", "--shard", "0/3"])
@@ -335,6 +366,39 @@ class EndToEndTests(unittest.TestCase):
                 self.assertNotEqual(r.returncode, 0)
                 self.assertIn("--from-c1", r.stderr)
             self.assertFalse((Path(td) / "c3_bad" / "metrics.json").exists())
+
+    def _run_script(self, td, claim, run_dir, extra_env=None, epochs="3"):
+        env = os.environ.copy()
+        env.update(PC_LAB_RUN_DIR=str(run_dir), PC_LAB_SKIP_LATEST="1", OMP_NUM_THREADS="1", MKL_NUM_THREADS="1")
+        env.pop("PC_LAB_TEST_STOP_AFTER_EPOCH", None)
+        env.update(extra_env or {})
+        script = ROOT / "experiments" / f"{rp.EXP_NAME[claim]}.py"
+        return subprocess.run(
+            [sys.executable, str(script), "--smoke", "--device", "cpu", "--seeds", "0", "--epochs", epochs,
+             "--overlay", self._overlay(td, f"cache_resume_{claim}")],
+            cwd=str(ROOT), env=env, capture_output=True, text=True,
+        )
+
+    def test_killed_training_resumes_bit_identically(self):
+        """A job killed after epoch 1 of 3 and rerun in the same directory must
+        produce exactly the metrics of an uninterrupted run (C1: plain training,
+        C7: the dictionary trains too, C8: several training calls and an encoder)."""
+        for claim in ("c1", "c7", "c8"):
+            with self.subTest(claim=claim), tempfile.TemporaryDirectory() as td:
+                full = Path(td) / "full"
+                r = self._run_script(td, claim, full)
+                self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+                cut = Path(td) / "cut"
+                r = self._run_script(td, claim, cut, {"PC_LAB_TEST_STOP_AFTER_EPOCH": "1"})
+                self.assertEqual(r.returncode, 75, r.stderr[-2000:])
+                self.assertTrue((cut / "train_ckpt" / "call1.pt").exists())
+                self.assertFalse((cut / "metrics.json").exists())
+                r = self._run_script(td, claim, cut)
+                self.assertEqual(r.returncode, 0, r.stderr[-2000:])
+                self.assertIn("resumed training from", r.stdout)
+                a = json.loads((full / "metrics.json").read_text())
+                b = json.loads((cut / "metrics.json").read_text())
+                self._assert_same_metrics(a, b)
 
     def test_shards_fill_one_run_dir_then_merge(self):
         with tempfile.TemporaryDirectory() as td:
