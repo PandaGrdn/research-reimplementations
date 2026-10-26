@@ -80,7 +80,9 @@ submit() {
   local args=()
   while [ "$1" != "--" ]; do args+=("$1"); shift; done; shift
   # the command runs in the background so the USR1 trap can fire while it works
-  local cmd="$PREAMBLE; $* & wait \$!"
+  # keep waiting until the command itself exits: a trapped signal interrupts
+  # `wait` early, and exiting then would kill the still-running command
+  local cmd="$PREAMBLE; $* & pid=\$!; while :; do wait \$pid; rc=\$?; kill -0 \$pid 2>/dev/null || break; done; exit \$rc"
   local full=(sbatch --parsable --job-name="pc-$name" --partition="$PARTITION" --time="$time"
               --nodes=1 --ntasks=1 --cpus-per-task=1 --mem="$MEM" --requeue --open-mode=append
               --signal=B:USR1@1800 --output="results/logs/%x-%j.out")
